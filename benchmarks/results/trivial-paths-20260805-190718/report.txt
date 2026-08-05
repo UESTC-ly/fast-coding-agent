@@ -1,0 +1,242 @@
+
+##############################################################################
+# gpt-5.6-sol
+##############################################################################
+runs: 48  clean: 48  excluded (infra): 0
+
+--- auto mode resolution ---
+FastPath completed  : 14/24
+escalated to Full   : 10/24
+behavioral pass     : 24/24
+full-mode behavioral: 24/24
+
+--- per task (full baseline -> auto) ---
+task                     full calls  full tok auto calls  auto tok  tok saved  how
+case-insensitive-dedupe           6     7,374          9    10,111     -2,737  escalated
+celsius-conversion                7     8,244          2       781     +7,463  fastpath
+context-manager                   6     6,949          2       922     +6,027  fastpath
+counter-reset-isolation           7    18,302          9    14,930     +3,372  escalated
+cross-module-flag                 8     9,302          8    12,629     -3,327  escalated
+dedupe-preserve-order             6    29,388          2     1,577    +27,811  fastpath
+empty-default                     8     9,434          2     5,194     +4,240  fastpath
+fix-subtract                      7     7,429          2     9,535     -2,106  fastpath
+guard-zero-division               7     8,442          2     5,283     +3,159  fastpath
+inclusive-range                   7     8,030          2     5,210     +2,820  fastpath
+merge-dicts-deep                  7    10,797          2     1,993     +8,804  fastpath
+multi-file-rename                 6     9,290          2       963     +8,327  fastpath
+mutable-default                   6     7,606          8    31,465    -23,859  escalated
+none-vs-falsy                     6     7,136          8     9,173     -2,037  escalated
+off-by-one                        5     5,543          2     5,275       +268  fastpath
+preserve-docstring                6    25,757          8    41,143    -15,386  escalated
+recursive-flatten                 6     7,896          2     5,551     +2,345  fastpath
+retry-with-backoff                6     8,080          8    15,374     -7,294  escalated
+shared-constant                   7     9,565          8    12,147     -2,582  escalated
+sort-stability                    5     5,780          2       932     +4,848  fastpath
+stateful-counter                  6    16,069          2     9,761     +6,308  fastpath
+strip-whitespace                  6    37,012          2       892    +36,120  fastpath
+truncate-suffix                   7     9,756          9    16,269     -6,513  escalated
+validate-then-store               6    22,707          8    14,975     +7,732  escalated
+
+--- suite totals (tasks solved by BOTH modes) ---
+tasks counted: 24
+                        full        auto       saved   
+tokens               295,888     232,085     +63,803   21.6%
+model calls              154         111         +43   27.9%
+agent loops              154          66         +88   57.1%
+
+token reduction: 1.27x
+
+--- escalation overhead (FastPath spend that bought nothing) ---
+  shared-constant: wasted 819 on FastPath, then 11,328 on Full Agent
+  preserve-docstring: wasted 895 on FastPath, then 40,248 on Full Agent
+  mutable-default: wasted 541 on FastPath, then 30,561 on Full Agent
+  truncate-suffix: wasted 5,748 on FastPath, then 10,158 on Full Agent
+  retry-with-backoff: wasted 595 on FastPath, then 9,533 on Full Agent
+  cross-module-flag: wasted 5,614 on FastPath, then 7,015 on Full Agent
+  validate-then-store: wasted 5,889 on FastPath, then 8,703 on Full Agent
+  none-vs-falsy: wasted 553 on FastPath, then 8,253 on Full Agent
+  case-insensitive-dedupe: wasted 546 on FastPath, then 9,224 on Full Agent
+  counter-reset-isolation: wasted 602 on FastPath, then 9,485 on Full Agent
+  total wasted: 21,802 tokens across 10 task(s)
+
+##############################################################################
+# gpt-5.6-terra
+##############################################################################
+runs: 48  clean: 48  excluded (infra): 0
+
+--- auto mode resolution ---
+FastPath completed  : 14/24
+escalated to Full   : 10/24
+behavioral pass     : 24/24
+full-mode behavioral: 24/24
+
+--- per task (full baseline -> auto) ---
+task                     full calls  full tok auto calls  auto tok  tok saved  how
+case-insensitive-dedupe           6     7,064          8     8,555     -1,491  escalated
+celsius-conversion                6     6,873          2     9,575     -2,702  fastpath
+context-manager                   6     7,551          2       898     +6,653  fastpath
+counter-reset-isolation           6     7,624          8     9,064     -1,440  escalated
+cross-module-flag                 6    28,263          8    15,744    +12,519  escalated
+dedupe-preserve-order             6     6,989          2       839     +6,150  fastpath
+empty-default                     6     6,960          2     5,336     +1,624  fastpath
+fix-subtract                      6    20,094          2       740    +19,354  fastpath
+guard-zero-division               6    31,297          2    10,042    +21,255  fastpath
+inclusive-range                   6    20,970          2     5,197    +15,773  fastpath
+merge-dicts-deep                  5     7,003          2     1,254     +5,749  fastpath
+multi-file-rename                 5     6,732          2       976     +5,756  fastpath
+mutable-default                   6     6,785          8     8,760     -1,975  escalated
+none-vs-falsy                     6     6,711          8     8,559     -1,848  escalated
+off-by-one                        6    26,700          2       807    +25,893  fastpath
+preserve-docstring                8    10,274          7     9,310       +964  escalated
+recursive-flatten                 6     7,363          2       985     +6,378  fastpath
+retry-with-backoff                6     8,015          8     9,813     -1,798  escalated
+shared-constant                   6     7,575          7    28,932    -21,357  escalated
+sort-stability                    5     5,909          2       932     +4,977  fastpath
+stateful-counter                  5     5,928          2     5,321       +607  fastpath
+strip-whitespace                  6     6,524          2       823     +5,701  fastpath
+truncate-suffix                   6     7,820          8     9,542     -1,722  escalated
+validate-then-store               6     7,730          8     9,100     -1,370  escalated
+
+--- suite totals (tasks solved by BOTH modes) ---
+tasks counted: 24
+                        full        auto       saved   
+tokens               264,754     161,104    +103,650   39.1%
+model calls              142         106         +36   25.4%
+agent loops              142          61         +81   57.0%
+
+token reduction: 1.64x
+
+--- escalation overhead (FastPath spend that bought nothing) ---
+  shared-constant: wasted 854 on FastPath, then 28,078 on Full Agent
+  preserve-docstring: wasted 995 on FastPath, then 8,315 on Full Agent
+  mutable-default: wasted 556 on FastPath, then 7,919 on Full Agent
+  truncate-suffix: wasted 584 on FastPath, then 8,642 on Full Agent
+  retry-with-backoff: wasted 689 on FastPath, then 8,803 on Full Agent
+  cross-module-flag: wasted 6,042 on FastPath, then 9,702 on Full Agent
+  validate-then-store: wasted 619 on FastPath, then 8,170 on Full Agent
+  none-vs-falsy: wasted 551 on FastPath, then 7,714 on Full Agent
+  case-insensitive-dedupe: wasted 542 on FastPath, then 7,688 on Full Agent
+  counter-reset-isolation: wasted 556 on FastPath, then 8,195 on Full Agent
+  total wasted: 11,988 tokens across 10 task(s)
+
+##############################################################################
+# gpt-5.6-luna
+##############################################################################
+runs: 48  clean: 43  excluded (infra): 5
+
+--- auto mode resolution ---
+FastPath completed  : 15/21
+escalated to Full   : 6/21
+behavioral pass     : 21/21
+full-mode behavioral: 21/22
+
+--- per task (full baseline -> auto) ---
+task                     full calls  full tok auto calls  auto tok  tok saved  how
+celsius-conversion                6     6,431          2       805     +5,626  fastpath
+context-manager                   6     6,963          2       969     +5,994  fastpath
+cross-module-flag                 7     8,992          1     1,364     +7,628  fastpath (beh full=False auto=True)
+dedupe-preserve-order             6     6,568          2       970     +5,598  fastpath
+empty-default                     7     7,834          2       884     +6,950  fastpath
+fix-subtract                      6     6,421          2       758     +5,663  fastpath
+guard-zero-division               6     6,884          2       863     +6,021  fastpath
+inclusive-range                   6     6,435          2       823     +5,612  fastpath
+merge-dicts-deep                  7    10,199          2     1,820     +8,379  fastpath
+multi-file-rename                 6     7,834          2     1,026     +6,808  fastpath
+mutable-default                   6     6,974          8     9,218     -2,244  escalated
+off-by-one                        6     6,399          2       875     +5,524  fastpath
+preserve-docstring                6     6,971          7     9,265     -2,294  escalated
+recursive-flatten                 6     7,127          2     1,394     +5,733  fastpath
+retry-with-backoff                6     8,094          8     9,189     -1,095  escalated
+shared-constant                   6     7,753          7     8,001       -248  escalated
+sort-stability                    6     6,547          2       910     +5,637  fastpath
+stateful-counter                  6     6,958          2       926     +6,032  fastpath
+strip-whitespace                  6     6,951          2       892     +6,059  fastpath
+truncate-suffix                   7     9,260          8    11,226     -1,966  escalated
+validate-then-store               6     7,427          9    10,696     -3,269  escalated
+
+--- suite totals (tasks solved by BOTH modes) ---
+tasks counted: 20
+                        full        auto       saved   
+tokens               146,030      71,510     +74,520   51.0%
+model calls              123          75         +48   39.0%
+agent loops              123          37         +86   69.9%
+
+token reduction: 2.04x
+
+--- escalation overhead (FastPath spend that bought nothing) ---
+  shared-constant: wasted 1,025 on FastPath, then 6,976 on Full Agent
+  preserve-docstring: wasted 1,091 on FastPath, then 8,174 on Full Agent
+  mutable-default: wasted 1,045 on FastPath, then 7,790 on Full Agent
+  truncate-suffix: wasted 2,077 on FastPath, then 8,829 on Full Agent
+  retry-with-backoff: wasted 735 on FastPath, then 8,040 on Full Agent
+  validate-then-store: wasted 1,022 on FastPath, then 9,349 on Full Agent
+  total wasted: 6,995 tokens across 6 task(s)
+
+##############################################################################
+# claude-sonnet-5
+##############################################################################
+runs: 48  clean: 48  excluded (infra): 0
+
+--- auto mode resolution ---
+FastPath completed  : 18/24
+escalated to Full   : 6/24
+behavioral pass     : 24/24
+full-mode behavioral: 20/24
+
+--- per task (full baseline -> auto) ---
+task                     full calls  full tok auto calls  auto tok  tok saved  how
+case-insensitive-dedupe           7     6,279          2     7,874     -1,595  fastpath
+celsius-conversion                7     6,015          2     7,544     -1,529  fastpath
+context-manager                   5     6,240          2     7,760     -1,520  fastpath
+counter-reset-isolation           8     7,307         10    17,248     -9,941  escalated
+cross-module-flag                 5     6,631          8    13,999     -7,368  escalated (beh full=False auto=True)
+dedupe-preserve-order             6     6,291          2     7,637     -1,346  fastpath
+empty-default                     7     6,103          2     7,609     -1,506  fastpath
+fix-subtract                      3       164          2     1,388     -1,224  fastpath (beh full=False auto=True)
+guard-zero-division               4       278          2     2,051     -1,773  fastpath (beh full=False auto=True)
+inclusive-range                   5     5,565          2     7,529     -1,964  fastpath
+merge-dicts-deep                  7     7,667          2     8,123       -456  fastpath
+multi-file-rename                 5     6,839          2     7,853     -1,014  fastpath
+mutable-default                   5     5,992          8    14,766     -8,774  escalated
+none-vs-falsy                     5     5,832          2     7,726     -1,894  fastpath
+off-by-one                        4       322          2     2,307     -1,985  fastpath (beh full=False auto=True)
+preserve-docstring                8     6,994          7    11,786     -4,792  escalated
+recursive-flatten                 5     6,131          2     7,792     -1,661  fastpath
+retry-with-backoff                9     7,355          8    17,031     -9,676  escalated
+shared-constant                   6     6,936          1     5,033     +1,903  fastpath
+sort-stability                    7     7,928          2     7,883        +45  fastpath
+stateful-counter                  4     5,886          2     7,743     -1,857  fastpath
+strip-whitespace                  8     6,486          2     7,704     -1,218  fastpath
+truncate-suffix                   7     7,243          9    18,511    -11,268  escalated
+validate-then-store               8     7,200          2     8,049       -849  fastpath
+
+--- suite totals (tasks solved by BOTH modes) ---
+tasks counted: 20
+                        full        auto       saved   
+tokens               132,289     193,201     -60,912   -46.0%
+model calls              129          71         +58   45.0%
+agent loops              129          33         +96   74.4%
+
+token reduction: 0.68x
+
+--- escalation overhead (FastPath spend that bought nothing) ---
+  preserve-docstring: wasted 4,510 on FastPath, then 7,276 on Full Agent
+  mutable-default: wasted 4,294 on FastPath, then 6,828 on Full Agent
+  truncate-suffix: wasted 4,404 on FastPath, then 10,469 on Full Agent
+  retry-with-backoff: wasted 4,908 on FastPath, then 8,417 on Full Agent
+  cross-module-flag: wasted 4,495 on FastPath, then 9,504 on Full Agent
+  counter-reset-isolation: wasted 4,155 on FastPath, then 9,431 on Full Agent
+  total wasted: 26,766 tokens across 6 task(s)
+
+==============================================================================
+MATRIX SUMMARY
+==============================================================================
+
+model                  behav  fp ok  esc   full tok   auto tok   saved     x
+claude-sonnet-5        44/48    18/24   6    132,289    193,201  -46.0%  0.68
+gpt-5.6-luna           42/43    15/21   6    146,030     71,510   51.0%  2.04
+gpt-5.6-sol            48/48    14/24  10    295,888    232,085   21.6%  1.27
+gpt-5.6-terra          48/48    14/24  10    264,754    161,104   39.1%  1.64
+
+--- excluded (infrastructure, not agent capability) ---
+  gpt-5.6-luna: provider=5

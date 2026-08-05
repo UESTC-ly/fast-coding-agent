@@ -1,0 +1,75 @@
+# Credentials. `.env` holds live API keys; only the placeholder template is
+# tracked. The absence of this rule is why keys reached an earlier history.
+.env
+.env.local
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# QQCode specific
+.qqcode/
+*.db
+*.db-shm
+*.db-wal
+shadow_*/
+worktree_*/
+
+# Benchmark artefacts: per-run outputs and the shared repo/venv caches.
+# These hold full clones of upstream repos and rebuilt venvs; all regenerable.
+benchmarks/results/
+benchmarks/.cache/
+
+# SWE-bench benchmark runs: these embed full upstream repo clones and the
+# experiment was invalidated by fixture-spec defects. The trivial-paths runs are
+# force-added instead (see docs/EXPERIMENT_FASTPATH_ROUTING.md).
+benchmarks/results/qqcode-abba-*/
+benchmarks/results/qqcode-verify-*/

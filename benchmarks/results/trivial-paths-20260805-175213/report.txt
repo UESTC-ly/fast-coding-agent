@@ -1,0 +1,13 @@
+runs: 3  clean: 3  excluded (infra): 0
+
+mode     n   behav  avg tokens  avg turns
+fast     1     1/1         427        0.0
+full     1     1/1       5,265        6.0
+auto     1     1/1       5,005        0.0
+
+paired on 1 task(s) where both paths passed:
+  FastPath   avg       427 tokens
+  Full Agent avg     5,265 tokens
+  reduction  12.3x  (91.9% fewer)
+
+auto runs that escalated: 0

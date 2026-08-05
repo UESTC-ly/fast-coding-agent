@@ -1,0 +1,51 @@
+[project]
+name = "qqcode"
+version = "0.1.0"
+description = "Coding Agent with intelligent routing: FastPath for simple tasks, Full Agent for complex work"
+requires-python = ">=3.11"
+dependencies = [
+    "langgraph>=0.2.70",
+    "langchain-core>=0.3.60",
+    "anthropic>=0.42.0",
+    "openai>=1.70.0",
+    "pydantic>=2.10.0",
+    "rich>=13.9.0",
+    "typer>=0.15.0",
+    "aiosqlite>=0.20.0",
+    "pyyaml>=6.0.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.25.0",
+    "ruff>=0.9.0",
+    "mypy>=1.14.0",
+    "types-PyYAML>=6.0.12",
+]
+
+[project.scripts]
+qqcode = "qqcode.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "SIM"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

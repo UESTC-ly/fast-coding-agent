@@ -1,0 +1,27 @@
+runs: 16  clean: 16  excluded (infra): 0
+
+--- auto mode resolution ---
+FastPath completed  : 8/8
+escalated to Full   : 0/8
+behavioral pass     : 8/8
+full-mode behavioral: 8/8
+
+--- per task (full baseline -> auto) ---
+task                     full calls  full tok auto calls  auto tok  tok saved  how
+celsius-conversion                6     5,512          2       628     +4,884  fastpath
+dedupe-preserve-order             6     5,630          2       747     +4,883  fastpath
+empty-default                     6     5,947          2       672     +5,275  fastpath
+fix-subtract                      6     5,265          2     5,008       +257  fastpath
+guard-zero-division               6     5,714          2       700     +5,014  fastpath
+inclusive-range                   6     5,597          2       620     +4,977  fastpath
+off-by-one                        6     5,476          2       662     +4,814  fastpath
+strip-whitespace                  5     4,833          2       728     +4,105  fastpath
+
+--- suite totals (tasks solved by BOTH modes) ---
+tasks counted: 8
+                        full        auto       saved   
+tokens                43,974       9,765     +34,209   77.8%
+model calls               47          16         +31   66.0%
+agent loops               47           0         +47   100.0%
+
+token reduction: 4.50x
