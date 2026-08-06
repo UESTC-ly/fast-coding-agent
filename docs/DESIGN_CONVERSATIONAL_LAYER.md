@@ -161,12 +161,39 @@ batch and conversational modes on one code path rather than forking
   is logged as `interrupted`. Because finalize is the *only* path to the real repo
   and it runs last, interruption is inherently safe — nothing partial escapes.
 - **User rejects a turn's result:** if not yet finalized, discard the shadow —
-  free. If already finalized, rollback needs a pre-turn restore point. Turn
-  records store `base_commit`; the honest answer for an already-finalized turn in
-  a dirty repo is that we cannot fully restore it, so the REPL will **require a
-  clean tree to start a session** and record the commit, making
-  `git checkout <base_commit> -- .` a valid undo. This is a stated limitation, not
-  a solved problem.
+  free.
+
+### 4.1 Undo — resolved, and not the way this section originally proposed
+
+**Superseded.** This section originally planned to anchor undo on the session's
+`base_commit` and therefore to *require a clean working tree at session start*.
+That was abandoned during implementation, because git cannot do the job in the
+case that matters most: `finalize` writes the working tree without committing, so
+for an applied-but-uncommitted turn there is no commit to return to, and checking
+out `base_commit` would additionally discard whatever the user had done by hand
+before the session began.
+
+`/undo` is instead **snapshot-based** (`qqcode/undo.py`). Accepting a turn keeps
+what `build_review` already read to produce the diff — each changed file's
+content on both sides. Undo replays that, so it is exact, scoped to one turn, and
+independent of version control.
+
+Consequences, all better than the original plan:
+
+- **No clean-tree requirement.** A session can start in a dirty repository.
+- **Per-turn, not per-session.** `/undo` reverses the last applied turn, which is
+  what people mean by "undo", rather than resetting the whole conversation.
+- **Refuses instead of merging.** If a file changed after the turn was applied,
+  restoring it would silently discard that later edit, so the REPL reports the
+  conflict and asks before proceeding.
+
+Remaining limits, stated plainly:
+
+- Binary files are reported unrestorable and left in place; their prior bytes
+  were never captured.
+- Undo history is per-process and deliberately not persisted — snapshots hold
+  full file contents, so writing them to `sessions.db` would grow it with the
+  size of the repository. A resumed session has nothing to undo and says so.
 
 ## 5. Build order
 
@@ -177,3 +204,39 @@ batch and conversational modes on one code path rather than forking
 5. `qqcode/repl.py` + `--resume` / `--continue` wiring (§1). Tests.
 
 Each step keeps pytest green and does not raise ruff/mypy counts.
+
+## 6. Open defect: L0 routes to FastPath without file hints
+
+Found while auditing routing behaviour after the conversational layer landed.
+**This predates the conversational work** and affects batch mode identically —
+conversation only made it frequent enough to notice.
+
+**Symptom.** Every FastPath attempt in live conversation traces declined and
+escalated. Across four repositories: 5 `declined`, 8 `model_error` (the latter
+were a dead Anthropic key, not a routing problem).
+
+**Root cause.** All five declines had `files_hint_count = 0`. Every L0 branch in
+`router.py` returns `files_hint=()` — L0 is a static rule, it decides *that* a
+task is simple without identifying *which* files it touches. FastPath prefetches
+file contents by `files_hint`, so it prefetched nothing, while its system prompt
+told the model "Current file contents are provided below the task description"
+and required whole-file replacement content. The model could not see the function
+it was asked to change, so it took the prompt's documented exit and returned an
+empty patch.
+
+**Measured, same task and model, only the hint differing:**
+
+| `files_hint` | outcome | tokens |
+|---|---|---|
+| `()` | declined → escalates to Full Agent | 745 wasted, then ~6,900 |
+| `("calc.py",)` | success | 786 |
+
+41 extra tokens for the hint avoids roughly 6,900. The waste lands precisely on
+the simple, single-file tasks FastPath exists to win.
+
+**Not fixed here** — a fix belongs with the routing layer and its own
+measurement, not tacked onto the conversation work. Options worth evaluating:
+have L0 extract filenames mentioned in the task, fall back to L1 for hints when
+L0 fires, or let FastPath prefetch a bounded set of recently-changed files when
+it has no hint. Whichever is chosen should be validated by `trace replay` against
+recorded traces rather than by intuition.
