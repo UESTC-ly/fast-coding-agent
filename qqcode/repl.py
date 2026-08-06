@@ -17,13 +17,14 @@ untouched.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import subprocess
 from pathlib import Path
 
 from rich.console import Console
 from rich.syntax import Syntax
 
 from qqcode.config import Config
+from qqcode.memory.session import SessionRecord, SessionStore, TurnRecord
 from qqcode.memory.trace import TraceStore
 from qqcode.orchestrator import Mode, RunResult, run_task
 from qqcode.review import ChangeReview, ConfirmCallback
@@ -35,36 +36,24 @@ EXIT_COMMANDS = frozenset({"/exit", "/quit", "exit", "quit"})
 # in the review object; this only bounds what is printed at once.
 MAX_PRINTED_DIFF_LINES = 120
 
-
-@dataclass
-class TurnRecord:
-    """One completed exchange, kept in memory for the session summary."""
-
-    task: str
-    outcome: str          # "accepted" | "rejected" | "failed" | "interrupted"
-    mode_used: str = ""
-    changed_files: tuple[str, ...] = ()
-    tokens: int = 0
+# Turns replayed in the header when resuming. Enough to recall where the
+# conversation stood without redisplaying an entire history.
+RESUME_CONTEXT_TURNS = 5
 
 
-@dataclass
-class Session:
-    """In-memory state for one REPL session.
+def current_commit(repo: Path) -> str:
+    """HEAD of `repo`, or "" when it is not a git repository.
 
-    Deliberately not persisted yet: `--resume` is a later increment, and a
-    half-built persistence layer would be worse than none.
+    Recorded at session start so an already-finalized turn has an undo anchor.
     """
-
-    repo: Path
-    turns: list[TurnRecord] = field(default_factory=list)
-
-    @property
-    def accepted_count(self) -> int:
-        return sum(1 for t in self.turns if t.outcome == "accepted")
-
-    @property
-    def total_tokens(self) -> int:
-        return sum(t.tokens for t in self.turns)
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return ""
+    return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
 def render_review(review: ChangeReview, console: Console) -> None:
@@ -132,16 +121,43 @@ def run_repl(
     trace_store: TraceStore | None = None,
     provider: str | None = None,
     model: str | None = None,
-) -> Session:
-    """Run the interactive loop until the user exits. Returns the session log."""
+    session_store: SessionStore | None = None,
+    resume: SessionRecord | None = None,
+) -> SessionRecord:
+    """Run the interactive loop until the user exits. Returns the session log.
+
+    Args:
+        session_store: Where turns are persisted, after each one rather than at
+            exit. `None` keeps the session in memory only.
+        resume: A previously stored session to continue. Its turn log is
+            replayed in the header and appended to, and its `base_commit` is
+            kept so the undo anchor still points at the original start.
+    """
     console = console or Console()
-    session = Session(repo=repo)
     confirm = make_confirm(console)
 
-    console.print(f"[bold]qqcode[/bold] — conversational mode  [dim]({repo})[/dim]")
+    session = resume or SessionRecord(
+        repo=str(repo.resolve()), base_commit=current_commit(repo)
+    )
+
+    if resume is not None:
+        _print_resume_header(session, console)
+    else:
+        console.print(f"[bold]qqcode[/bold] — conversational mode  [dim]({repo})[/dim]")
+        console.print(f"[dim]session {session.short_id}[/dim]")
     console.print(
         "[dim]Describe a task, or /exit to leave. Ctrl-C cancels the current turn.[/dim]"
     )
+
+    def record(turn: TurnRecord) -> None:
+        """Append a turn and persist immediately.
+
+        Saving per turn rather than at exit means a crash costs the turn in
+        flight, not the whole conversation.
+        """
+        session.turns.append(turn)
+        if session_store is not None:
+            session_store.save(session)
 
     while True:
         try:
@@ -173,17 +189,17 @@ def run_repl(
             # The shadow was discarded by the workspace context manager and
             # finalize never ran, so the repository is untouched.
             console.print("\n[yellow]Turn cancelled. Repository unchanged.[/yellow]")
-            session.turns.append(TurnRecord(task=task, outcome="interrupted"))
+            record(TurnRecord(task=task, outcome="interrupted"))
             continue
         except Exception as exc:
             # Surfaced, never swallowed: a silent failure here costs far more
             # time to diagnose than a loud one.
             console.print(f"[red]Error:[/red] {type(exc).__name__}: {exc}")
-            session.turns.append(TurnRecord(task=task, outcome="failed"))
+            record(TurnRecord(task=task, outcome="failed"))
             continue
 
         outcome = _describe(result)
-        session.turns.append(
+        record(
             TurnRecord(
                 task=task,
                 outcome=outcome,
@@ -212,11 +228,39 @@ def _report_turn(result: RunResult, outcome: str, console: Console) -> None:
             console.print(f"[dim]{result.error[:300]}[/dim]")
 
 
-def _report_session(session: Session, console: Console) -> None:
+def _print_resume_header(session: SessionRecord, console: Console) -> None:
+    """Recall where the conversation stood, without redisplaying everything."""
+    console.print(
+        f"[bold]qqcode[/bold] — resumed session [cyan]{session.short_id}[/cyan]  "
+        f"[dim]({session.repo})[/dim]"
+    )
+    if not session.turns:
+        console.print("[dim]No turns recorded yet.[/dim]")
+        return
+
+    hidden = len(session.turns) - RESUME_CONTEXT_TURNS
+    if hidden > 0:
+        console.print(f"[dim]... {hidden} earlier turn(s) ...[/dim]")
+
+    icons = {"accepted": "[green]✓[/green]", "rejected": "[yellow]✗[/yellow]",
+             "failed": "[red]![/red]", "interrupted": "[dim]~[/dim]"}
+    for i, turn in enumerate(session.turns[-RESUME_CONTEXT_TURNS:], start=max(1, hidden + 1)):
+        icon = icons.get(turn.outcome, "?")
+        console.print(f"  {icon} [dim]{i}.[/dim] {turn.task[:70]}")
+
+    console.print(
+        f"[dim]{len(session.turns)} turn(s) so far, {session.accepted_count} applied.[/dim]"
+    )
+
+
+def _report_session(session: SessionRecord, console: Console) -> None:
     if not session.turns:
         return
     console.print()
     console.print(
         f"[dim]{len(session.turns)} turn(s), {session.accepted_count} applied, "
         f"{session.total_tokens:,} tokens.[/dim]"
+    )
+    console.print(
+        f"[dim]Resume with:[/dim] qqcode --chat --resume {session.short_id}"
     )

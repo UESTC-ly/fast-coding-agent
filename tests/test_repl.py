@@ -17,9 +17,10 @@ import pytest
 from rich.console import Console
 
 from qqcode.config import Config, ProviderConfig
+from qqcode.memory.session import SessionRecord
 from qqcode.models.protocol import CostLedger
 from qqcode.orchestrator import RunResult
-from qqcode.repl import Session, make_confirm, render_review, run_repl
+from qqcode.repl import make_confirm, render_review, run_repl
 from qqcode.review import ChangeReview, FileDiff
 
 
@@ -218,9 +219,9 @@ class TestRenderReview:
 
 class TestSessionAccounting:
     def test_counts_and_totals(self) -> None:
-        from qqcode.repl import TurnRecord
+        from qqcode.memory.session import TurnRecord
 
-        session = Session(repo=Path("."))
+        session = SessionRecord(repo=".")
         session.turns = [
             TurnRecord(task="a", outcome="accepted", tokens=100),
             TurnRecord(task="b", outcome="rejected", tokens=50),
@@ -246,3 +247,127 @@ class TestSessionAccounting:
 
         assert rt.call_args.kwargs["model"] is None
         assert rt.call_args.kwargs["provider"] is None
+
+
+class TestPersistence:
+    """Turns are saved as they complete, not at exit."""
+
+    def _store(self, tmp_path: Path) -> Any:
+        from qqcode.memory.session import SessionStore
+        return SessionStore(tmp_path / "s.db")
+
+    def test_turns_are_persisted(self, repo: Path, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        console = _console(["one", "two", "/exit"])
+        with patch("qqcode.repl.run_task", return_value=_result()):
+            session = run_repl(repo, _config(), console=console, session_store=store)
+
+        reloaded = store.load(session.id)
+        assert reloaded is not None
+        assert [t.task for t in reloaded.turns] == ["one", "two"]
+        store.close()
+
+    def test_a_turn_survives_a_crash_in_a_later_turn(self, repo: Path, tmp_path: Path) -> None:
+        """Saving per turn is what makes this true; saving at exit would not."""
+        store = self._store(tmp_path)
+        console = _console(["good", "bad", "/exit"])
+
+        def flaky(task: str, *a: Any, **kw: Any) -> RunResult:
+            if task == "bad":
+                raise RuntimeError("upstream exploded")
+            return _result()
+
+        with patch("qqcode.repl.run_task", side_effect=flaky):
+            session = run_repl(repo, _config(), console=console, session_store=store)
+
+        reloaded = store.load(session.id)
+        assert reloaded is not None
+        assert [(t.task, t.outcome) for t in reloaded.turns] == [
+            ("good", "accepted"), ("bad", "failed"),
+        ]
+        store.close()
+
+    def test_interrupted_turns_are_persisted(self, repo: Path, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        console = _console(["slow", "/exit"])
+        with patch("qqcode.repl.run_task", side_effect=KeyboardInterrupt):
+            session = run_repl(repo, _config(), console=console, session_store=store)
+
+        reloaded = store.load(session.id)
+        assert reloaded is not None
+        assert reloaded.turns[0].outcome == "interrupted"
+        store.close()
+
+    def test_no_store_still_works(self, repo: Path) -> None:
+        """session_store=None keeps the session in memory rather than failing."""
+        console = _console(["task", "/exit"])
+        with patch("qqcode.repl.run_task", return_value=_result()):
+            session = run_repl(repo, _config(), console=console)
+        assert len(session.turns) == 1
+
+
+class TestResume:
+    def test_resumed_session_appends_rather_than_restarting(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        from qqcode.memory.session import SessionStore
+
+        store = SessionStore(tmp_path / "s.db")
+        with patch("qqcode.repl.run_task", return_value=_result()):
+            first = run_repl(repo, _config(), console=_console(["one", "/exit"]),
+                             session_store=store)
+            second = run_repl(repo, _config(), console=_console(["two", "/exit"]),
+                              session_store=store, resume=first)
+
+        assert second.id == first.id
+        assert [t.task for t in second.turns] == ["one", "two"]
+        assert store.count() == 1          # continued, not duplicated
+        store.close()
+
+    def test_resume_keeps_the_original_base_commit(self, repo: Path, tmp_path: Path) -> None:
+        """The undo anchor must still point at where the conversation started."""
+        from qqcode.memory.session import SessionRecord, SessionStore
+
+        store = SessionStore(tmp_path / "s.db")
+        prior = SessionRecord(repo=str(repo.resolve()), base_commit="f" * 40)
+        store.save(prior)
+
+        with patch("qqcode.repl.run_task", return_value=_result()):
+            resumed = run_repl(repo, _config(), console=_console(["task", "/exit"]),
+                               session_store=store, resume=prior)
+
+        assert resumed.base_commit == "f" * 40
+        store.close()
+
+    def test_resume_header_shows_prior_turns(self, repo: Path, tmp_path: Path) -> None:
+        from qqcode.memory.session import TurnRecord
+
+        prior = SessionRecord(repo=str(repo.resolve()))
+        prior.turns.append(TurnRecord(task="earlier work", outcome="accepted"))
+        console = _console(["/exit"])
+        run_repl(repo, _config(), console=console, resume=prior)
+
+        out = console.file.getvalue()  # type: ignore[attr-defined]
+        assert "resumed session" in out
+        assert "earlier work" in out
+
+    def test_fresh_session_records_the_current_commit(self, tmp_path: Path) -> None:
+        import subprocess
+
+        root = tmp_path / "g"
+        root.mkdir()
+        (root / "f.py").write_text("x = 1\n")
+        env = {
+            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+            "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+        }
+        for cmd in (["git", "init", "-q"], ["git", "add", "."], ["git", "commit", "-qm", "i"]):
+            subprocess.run(cmd, cwd=root, check=True, capture_output=True, env=env)
+
+        session = run_repl(root, _config(), console=_console(["/exit"]))
+        assert len(session.base_commit) == 40
+
+    def test_non_git_repo_yields_empty_base_commit(self, repo: Path) -> None:
+        session = run_repl(repo, _config(), console=_console(["/exit"]))
+        assert session.base_commit == ""

@@ -22,6 +22,7 @@ from rich.table import Table
 
 from qqcode.config import Config
 from qqcode.memory.replay import CalibrationRow, ReplayEngine
+from qqcode.memory.session import SessionRecord, SessionStore
 from qqcode.memory.trace import TraceStore
 from qqcode.orchestrator import RunResult, run_task
 
@@ -42,10 +43,16 @@ def run(
     model: Annotated[str, typer.Option("--model", help="Pin a specific model id")] = "",
     max_turns: Annotated[int, typer.Option("--max-turns", help="Full Agent turn limit")] = 30,
     chat: Annotated[bool, typer.Option("--chat", "-c", help="Interactive conversation")] = False,
+    resume: Annotated[str, typer.Option("--resume", help="Resume a session by id")] = "",
+    cont: Annotated[
+        bool, typer.Option("--continue", help="Resume the most recent session")
+    ] = False,
 ) -> None:
     """Run a coding task, or use 'qqcode trace' for calibration commands."""
     if ctx.invoked_subcommand is not None:
         return  # a trace/other subcommand was invoked; let it run
+    if resume or cont:
+        chat = True  # resuming only means anything in conversational mode
     if not task and not chat:
         console.print("[red]Error:[/red] --task is required (or use --chat)")
         raise typer.Exit(1)
@@ -68,6 +75,15 @@ def run(
         from qqcode.repl import run_repl
 
         store = TraceStore.for_repo(repo)
+        sessions = SessionStore.for_repo(repo)
+        try:
+            prior = _resolve_session(sessions, repo, resume=resume, cont=cont)
+        except (ValueError, LookupError) as exc:
+            console.print(f"[red]Error:[/red] {exc}")
+            sessions.close()
+            store.close()
+            raise typer.Exit(1) from exc
+
         try:
             run_repl(
                 repo,
@@ -78,8 +94,11 @@ def run(
                 trace_store=store,
                 provider=provider or None,
                 model=model or None,
+                session_store=sessions,
+                resume=prior,
             )
         finally:
+            sessions.close()
             store.close()
         raise typer.Exit(0)
 
@@ -107,6 +126,32 @@ def run(
 
     _display_result(result)
     raise typer.Exit(0 if result.success else 1)
+
+
+def _resolve_session(
+    sessions: SessionStore, repo: Path, *, resume: str, cont: bool
+) -> SessionRecord | None:
+    """Find the session to continue, or None to start fresh.
+
+    A requested-but-missing session is an error, not a silent new session:
+    starting over when the user asked to resume looks identical to resuming, and
+    they would only notice the lost history several turns later.
+
+    Raises:
+        LookupError: The requested session does not exist.
+        ValueError: A short id matched more than one session.
+    """
+    if resume:
+        found = sessions.load(resume)
+        if found is None:
+            raise LookupError(f"no session found with id {resume!r}")
+        return found
+    if cont:
+        found = sessions.latest(repo)
+        if found is None:
+            raise LookupError(f"no previous session for {repo}")
+        return found
+    return None
 
 
 def _display_result(result: RunResult) -> None:
