@@ -21,6 +21,7 @@ clean baseline but knows what FastPath tried and how it failed.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -66,6 +67,48 @@ PATCH_TOOL_NAME = "submit_patch"
 # to Full Agent, which can read them selectively instead of all at once.
 MAX_PREFETCH_TOTAL_CHARS = 20_000
 MAX_PREFETCH_FILE_CHARS = 8_000
+
+# Cap on paths recovered from the task text when no hint was supplied. The
+# total-chars budget already bounds the prompt; this bounds the tree scan and
+# keeps a task that lists a dozen filenames from crowding out the task itself.
+MAX_PREFETCH_RESOLVED_FILES = 3
+
+# Depth ceiling for resolving a bare basename ("config.py") to a real path.
+# Bounds an otherwise O(repo) search on the code path whose whole justification
+# is being cheap: a repository vendoring a virtualenv can hold >100k files.
+MAX_PREFETCH_SCAN_DEPTH = 4
+
+# Directories never worth searching for task context: build artefacts, vendored
+# dependencies, and caches. Skipping them also removes the main source of
+# ambiguous basename collisions (every venv has its own `config.py`).
+_EXCLUDED_DIRS = frozenset({
+    ".git",
+    ".hg",
+    ".svn",
+    ".tox",
+    ".nox",
+    ".venv",
+    "venv",
+    "env",
+    "node_modules",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "site-packages",
+    "dist",
+    "build",
+    ".eggs",
+})
+
+# A path-looking token: a name ending in a known source extension, optionally
+# with directory components. Requiring a known extension is what keeps ordinary
+# prose ("Fix the bug.Then add a test.") from parsing as a filename — a bare
+# `\S+\.\S+` matches sentences far more often than it matches paths.
+_PATH_TOKEN = re.compile(
+    r"\b[\w][\w./-]*\.(?:py|pyi|js|jsx|ts|tsx|go|rs|rb|java|c|h|cpp|hpp|cs|php|swift|kt"
+    r"|sh|sql|css|scss|html|json|toml|yaml|yml|ini|cfg|md|rst|txt)\b"
+)
 
 
 class EscalationReason:
@@ -221,6 +264,110 @@ def _build_messages(
     return messages
 
 
+def resolve_prefetch_paths(
+    task: str, files_hint: tuple[str, ...], workspace: Workspace
+) -> tuple[str, ...]:
+    """Decide which files to inline into the prompt.
+
+    `files_hint` serves two masters. For prefetch it is advisory — a guess that
+    costs tokens when wrong. For condition 3 it is a contract: the diff must be
+    a subset of it. Only L1 produces one, so L0 and the fallback route reach
+    FastPath with `()`, and the prefetch then reads nothing while the prompt
+    still claims file contents were provided. The model cannot see the code it
+    was asked to change, so it takes the documented exit and the call is wasted.
+
+    This closes that gap on the prefetch side only. When a hint exists it is
+    returned untouched, including paths that do not exist yet — a hint naming a
+    new file means "create it", and filtering it here would silently narrow the
+    enforcement set. Otherwise filenames are recovered from the task text and
+    kept only when they resolve to exactly one real file.
+
+    The result deliberately does not flow back into `files_hint`. Feeding it
+    there would turn a guess into a contract and reject correct patches that
+    touch a file the task never named — trading a decline for a wrong rejection.
+    """
+    if files_hint:
+        return files_hint
+
+    candidates = [raw.lstrip("./") for raw in _PATH_TOKEN.findall(task)]
+    if not candidates:
+        return ()
+
+    resolved: list[str] = []
+    unresolved: list[str] = []
+
+    # An explicit relative path needs no search. This is the common case and it
+    # costs one stat per candidate, so try it before walking anything.
+    for candidate in candidates:
+        if _is_file(workspace, candidate):
+            _append_unique(resolved, candidate)
+        else:
+            unresolved.append(candidate)
+
+    # Only a bare basename ("config.py") justifies a directory walk. Search a
+    # bounded, shallow neighbourhood rather than the whole tree: `list_files()`
+    # is O(repo) and this runs on the path whose entire purpose is being fast —
+    # a repository vendoring a virtualenv can hold >100k files, where a full
+    # rglob costs seconds. Prefer no context over a slow prompt.
+    if unresolved and len(resolved) < MAX_PREFETCH_RESOLVED_FILES:
+        for candidate in unresolved:
+            match = _find_unique_shallow(workspace, candidate)
+            if match is not None:
+                _append_unique(resolved, match)
+
+    return tuple(sorted(resolved)[:MAX_PREFETCH_RESOLVED_FILES])
+
+
+def _find_unique_shallow(workspace: Workspace, basename: str) -> str | None:
+    """The one file named `basename` within a shallow search, or None.
+
+    Returns None when the name is missing *or* ambiguous. Inlining an arbitrary
+    `config.py` would spend tokens on misleading context, which is worse than
+    sending none.
+
+    Depth is capped because the cost is unbounded otherwise, and because a file
+    the task refers to by bare name is rarely buried deep. A deeper file is not
+    resolved — it simply gets no prefetch, which is the pre-fix behaviour.
+    """
+    root = Path(workspace.root)
+    matches: list[str] = []
+
+    for depth in range(MAX_PREFETCH_SCAN_DEPTH + 1):
+        pattern = "/".join(["*"] * depth + [basename]) if depth else basename
+        try:
+            found = [p for p in root.glob(pattern) if p.is_file()]
+        except OSError:
+            return None
+        for p in found:
+            rel = p.relative_to(root).as_posix()
+            if _EXCLUDED_DIRS.isdisjoint(p.relative_to(root).parts[:-1]):
+                _append_unique(matches, rel)
+        if len(matches) > 1:
+            return None  # ambiguous; stop early
+
+    return matches[0] if len(matches) == 1 else None
+
+
+def _is_file(workspace: Workspace, path: str) -> bool:
+    """Whether `path` names a readable file, without trusting it to be safe.
+
+    Goes through `read_file` rather than the filesystem so the workspace's own
+    path guard decides what is reachable; a task naming `../../etc/passwd`
+    must not become prompt context.
+    """
+    try:
+        workspace.read_file(path)
+    except Exception:
+        return False
+    return True
+
+
+def _append_unique(paths: list[str], path: str) -> None:
+    """Add `path` if absent — a task may name the same file twice."""
+    if path not in paths:
+        paths.append(path)
+
+
 def execute_fastpath(
     inp: FastPathInput,
     workspace: Workspace,
@@ -247,7 +394,8 @@ def execute_fastpath(
         normal outcome, not an error.
     """
     _, skills = inp.skill_index.select("fastpath", task=inp.task, paths=inp.files_hint)
-    file_contents = _prefetch_files(inp.files_hint, workspace)
+    prefetch_paths = resolve_prefetch_paths(inp.task, inp.files_hint, workspace)
+    file_contents = _prefetch_files(prefetch_paths, workspace)
     messages = _build_messages(inp.task, [s.body for s in skills], file_contents, inp.history)
 
     try:

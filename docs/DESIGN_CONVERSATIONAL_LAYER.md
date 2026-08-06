@@ -234,9 +234,65 @@ empty patch.
 41 extra tokens for the hint avoids roughly 6,900. The waste lands precisely on
 the simple, single-file tasks FastPath exists to win.
 
-**Not fixed here** — a fix belongs with the routing layer and its own
-measurement, not tacked onto the conversation work. Options worth evaluating:
-have L0 extract filenames mentioned in the task, fall back to L1 for hints when
-L0 fires, or let FastPath prefetch a bounded set of recently-changed files when
-it has no hint. Whichever is chosen should be validated by `trace replay` against
-recorded traces rather than by intuition.
+### 6.1 Fixed: resolution happens in FastPath, not in the router
+
+The fix does not live in `router.py`, and none of the three options above were
+adopted as written. Two facts decided it.
+
+**`files_hint` has two roles, and only one of them wanted fixing.** For prefetch
+it is advisory — a wrong guess costs tokens. For condition 3 it is a contract:
+`unexpected = changed - set(files_hint)`. Populating it from guessed filenames
+would trade `DECLINED` for a *worse* failure: a task naming `calc.py` whose
+correct patch also touches `utils.py` becomes `UNEXPECTED_MODIFICATIONS`, and a
+good patch is thrown away. A mutant implementing exactly that naive fix is
+covered by `test_resolution_does_not_become_an_enforcement_contract`; it fails
+with `expected: calc.py, unexpected: utils.py`.
+
+So resolution feeds **prefetch only**. `files_hint` is untouched, and the trace's
+`files_hint_count` stays 0 on the L0 route — which is the honest record, because
+L0 still does not know the expected file set.
+
+**A filename must be validated against the real tree, and the router has no
+workspace.** `route_task` takes a task string and a `SkillIndex`; the workspace
+is created later, inside `_try_fastpath`. Resolving in the router would mean
+trusting unvalidated text. `resolve_prefetch_paths` therefore lives in
+`fastpath.py`, which covers all three hint-less entry points at once: the L0 FAST
+skill hint, the `fallback` route, and `mode="fast"` (orchestrator.py:131, which
+passes `()` literally).
+
+Resolution keeps only names that map to exactly one real file. Ambiguity is
+declined rather than guessed — inlining an arbitrary `config.py` spends tokens on
+misleading context, which is worse than sending none. Containment goes through
+`workspace.read_file`, so the workspace's own `PathGuard` decides reachability:
+note that `Path(root) / "/abs/path"` *discards* the root, so a naive `is_file()`
+would happily confirm a file outside the workspace.
+
+**A/B, real API (OpenAI, gpt-5.6-terra), 3 tasks, arm A monkeypatched back to
+pre-fix behaviour:**
+
+| arm | settled in FastPath | mean tokens | total |
+|---|---|---|---|
+| pre-fix | 0/3 (all `declined` → Full Agent) | 6,297 | 18,892 |
+| fixed | 3/3 (`fastpath_ok`) | 868 | 2,604 |
+
+**−16,288 tokens, −86.2%.** Traces confirm the mechanism rather than a
+coincidence: both arms routed `l0` with `files_hint_count = 0` and the same
+`L0: Skill routing hint suggests FastPath` reason; only `fastpath_reason`
+differs (`declined` vs `ok`).
+
+**Why `trace replay` could not validate this.** The handoff required replay, and
+it does not apply here — stated plainly rather than worked around. `route_offline`
+maps `(l0_triggered, l1_confidence, files_hint_count, task_length)` to a
+*decision*; this fix changes what FastPath is shown *after* the decision, and
+leaves every replay input identical. Replay is structurally blind to it. The
+repository's trace store was also empty (0 rows), so the traces behind §6's
+evidence no longer existed. Validation is instead: 24 tests, each verified by
+mutation (13 mutants, all killed, including the naive-fix trap and a
+computed-but-not-wired mutant that fails 4 tests), plus the real-API A/B above.
+
+**Cost.** Resolution must not walk the repo: `list_files()` is O(repo). The
+search is a bounded, depth-capped glob with vendored directories pruned. In the
+production config (`use_git=True`, a git worktree of tracked files) resolution
+costs ~0.001s. An earlier measurement of 3.3s was an artifact of probing with
+`use_git=False`, whose `copytree` fallback pulls in this repo's untracked 1.5G
+`benchmarks/` cache; the bound is kept because that fallback is a real code path.
