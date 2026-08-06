@@ -12,9 +12,20 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Literal
 
 from qqcode.safety.guards import CommandGuard, PathGuard, WriteQuota
 from qqcode.workspace.protocol import WorkspaceSnapshot, snapshot_directory
+
+# How the shadow is seeded from the source repository.
+#
+# "head"     — `git worktree add --detach HEAD`: the shadow reflects the last
+#              commit. Uncommitted work in the source is NOT present.
+# "worktree" — same, then modified and untracked files are overlaid so the
+#              shadow reflects the source's *working tree*. Required for
+#              multi-turn conversation, where turn N must build on turn N-1's
+#              output, which lives in the working tree and may not be committed.
+Seed = Literal["head", "worktree"]
 
 # Environment variables stripped before running any command (secret hygiene).
 SECRET_ENV_PREFIXES = (
@@ -45,6 +56,63 @@ def _sanitized_env(overrides: dict[str, str] | None = None) -> dict[str, str]:
     return clean
 
 
+class DirtyWorktreeError(RuntimeError):
+    """Finalizing would destroy uncommitted work in the target repository."""
+
+
+def _has_uncommitted_changes(target: Path) -> bool:
+    """Whether `target` is a git repo with uncommitted changes.
+
+    Returns False when the path is not a git repository or git cannot be run:
+    the dirty check is a safety net over git's own recovery guarantees, and
+    without git there is nothing to compare against. Refusing to finalize in
+    that case would break every non-git workspace instead of protecting it.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(target), "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    if proc.returncode != 0:
+        return False  # not a git repository
+    return bool(proc.stdout.strip())
+
+
+def _parse_porcelain_paths(raw: str) -> list[str]:
+    """Extract affected repo-relative paths from `git status --porcelain -z`.
+
+    `-z` is used rather than line-based output because it is the only form that
+    survives paths containing spaces, quotes, or newlines: entries are
+    NUL-separated and paths are never quoted or escaped.
+
+    Rename and copy entries (`R`/`C`) carry *two* NUL-separated paths — new then
+    old. Both are returned: the new path must be copied in, and the old one must
+    be deleted from the shadow, which the caller does by finding it absent in the
+    source.
+    """
+    fields = [f for f in raw.split("\0") if f]
+    paths: list[str] = []
+    i = 0
+    while i < len(fields):
+        entry = fields[i]
+        i += 1
+        # Format: XY<space><path>. Status codes occupy exactly two columns.
+        if len(entry) < 4:
+            continue
+        codes, path = entry[:2], entry[3:]
+        paths.append(path)
+        # Rename/copy entries carry a second field: the original path.
+        if ("R" in codes or "C" in codes) and i < len(fields):
+            paths.append(fields[i])
+            i += 1
+    return paths
+
+
 class WorktreeWorkspace:
     """Isolated workspace backed by a shadow directory copy.
 
@@ -60,20 +128,28 @@ class WorktreeWorkspace:
         *,
         use_git: bool = True,
         quota: WriteQuota | None = None,
+        seed: Seed = "head",
     ):
         """
         Args:
             source: Real repository root to shadow.
             use_git: Attempt `git worktree add` before falling back to copy.
             quota: Write limits; a default quota is created when omitted.
+            seed: Whether the shadow reflects the last commit ("head", the
+                default) or the source's working tree ("worktree"). Only
+                meaningful on the git path — the copy fallback always copies the
+                working tree, so it already behaves as "worktree".
         """
         self.source = source.resolve()
+        self._seed: Seed = seed
         self._shadow_parent = Path(tempfile.mkdtemp(prefix="qqcode_shadow_"))
         self._root = self._shadow_parent / self.source.name
         self._is_worktree = False
 
         if use_git and self._try_git_worktree():
             self._is_worktree = True
+            if seed == "worktree":
+                self._overlay_working_tree()
         else:
             shutil.copytree(
                 self.source,
@@ -133,6 +209,49 @@ class WorktreeWorkspace:
         except (subprocess.SubprocessError, OSError):
             return False
 
+    def _overlay_working_tree(self) -> None:
+        """Overlay the source's uncommitted state onto a HEAD-seeded shadow.
+
+        `git worktree add` seeds from a commit, so a shadow built that way is
+        missing everything not yet committed. Multi-turn conversation needs the
+        opposite: turn N must see turn N-1's output, which may sit uncommitted in
+        the working tree.
+
+        Deletions are replayed too. Copying only modified and untracked files
+        would resurrect a file the previous turn deleted, and the agent would
+        then "fix" a file the user believes is gone.
+
+        Raises:
+            RuntimeError: `git status` failed, so the working tree state is
+                unknown. Seeding from a partially-overlaid tree would silently
+                give the agent a wrong view of the repository.
+        """
+        status = subprocess.run(
+            ["git", "-C", str(self.source), "status", "--porcelain", "-z", "--untracked-files=all"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if status.returncode != 0:
+            raise RuntimeError(
+                f"cannot read working tree state of {self.source}: "
+                f"git status failed ({status.returncode}): {status.stderr.strip()}"
+            )
+
+        for rel in _parse_porcelain_paths(status.stdout):
+            src = self.source / rel
+            dst = self._root / rel
+            if src.is_symlink() or src.is_file():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst, follow_symlinks=False)
+            elif not src.exists():
+                # Deleted in the source: replay the deletion in the shadow.
+                if dst.is_file() or dst.is_symlink():
+                    dst.unlink()
+                elif dst.is_dir():
+                    shutil.rmtree(dst, ignore_errors=True)
+
     def snapshot(self) -> WorkspaceSnapshot:
         return snapshot_directory(self._root)
 
@@ -186,8 +305,13 @@ class WorktreeWorkspace:
 
         Writes to a sibling staging directory first, then swaps directories so a
         crash mid-copy cannot leave the target half-updated.
+
+        Raises:
+            DirtyWorktreeError: The shadow was seeded from HEAD but the target
+                has uncommitted changes, so finalizing would destroy them.
         """
         target = target.resolve()
+        self._assert_safe_to_finalize(target)
         staging = target.parent / f".qqcode_staging_{target.name}"
         backup = target.parent / f".qqcode_backup_{target.name}"
 
@@ -216,6 +340,27 @@ class WorktreeWorkspace:
             backup.rename(target)
             raise
         shutil.rmtree(backup)
+
+    def _assert_safe_to_finalize(self, target: Path) -> None:
+        """Refuse to overwrite uncommitted work with a stale HEAD-seeded shadow.
+
+        `finalize` replaces the target wholesale. When the shadow came from HEAD
+        it never contained the target's uncommitted changes, so writing it back
+        deletes them with no way to recover — the changes were never committed,
+        so git cannot restore them either.
+
+        A "worktree"-seeded shadow already contains those changes, so it is safe
+        and this check does not apply.
+        """
+        if self._seed == "worktree":
+            return
+        if not _has_uncommitted_changes(target):
+            return
+        raise DirtyWorktreeError(
+            f"{target} has uncommitted changes, and this workspace was seeded from HEAD "
+            f"(so it does not contain them). Finalizing would destroy that work. "
+            f"Commit or stash first, or use seed='worktree'."
+        )
 
     def cleanup(self) -> None:
         """Remove the shadow directory and any git worktree registration."""

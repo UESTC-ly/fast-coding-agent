@@ -8,7 +8,11 @@ from pathlib import Path
 import pytest
 
 from qqcode.workspace.protocol import snapshot_directory
-from qqcode.workspace.worktree import WorktreeWorkspace, _sanitized_env
+from qqcode.workspace.worktree import (
+    DirtyWorktreeError,
+    WorktreeWorkspace,
+    _sanitized_env,
+)
 
 
 @pytest.fixture
@@ -220,3 +224,149 @@ class TestEnvSanitization:
             )
             assert code == 0
             assert out.strip() == "ABSENT"
+
+
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run a git command in `root` with a hermetic identity."""
+    env = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+        "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+    }
+    return subprocess.run(
+        ["git", *args], cwd=root, check=True, capture_output=True, text=True, env=env
+    )
+
+
+class TestSeeding:
+    """Seeding semantics: "head" reflects the last commit, "worktree" the live tree.
+
+    The distinction is what makes multi-turn conversation possible. A shadow
+    seeded from HEAD cannot see the previous turn's output unless that turn
+    committed, so a second turn would silently revert the first.
+    """
+
+    def test_head_seed_ignores_uncommitted_changes(self, git_repo: Path) -> None:
+        (git_repo / "main.py").write_text("print('uncommitted')\n")
+        with WorktreeWorkspace(git_repo, seed="head") as ws:
+            assert ws.is_worktree
+            assert ws.read_file("main.py") == "print('hello')\n"
+
+    def test_worktree_seed_sees_uncommitted_changes(self, git_repo: Path) -> None:
+        (git_repo / "main.py").write_text("print('uncommitted')\n")
+        with WorktreeWorkspace(git_repo, seed="worktree") as ws:
+            assert ws.is_worktree
+            assert ws.read_file("main.py") == "print('uncommitted')\n"
+
+    def test_worktree_seed_sees_untracked_files(self, git_repo: Path) -> None:
+        (git_repo / "brand_new.py").write_text("x = 1\n")
+        with WorktreeWorkspace(git_repo, seed="worktree") as ws:
+            assert ws.read_file("brand_new.py") == "x = 1\n"
+
+    def test_worktree_seed_sees_untracked_nested_files(self, git_repo: Path) -> None:
+        (git_repo / "pkg").mkdir()
+        (git_repo / "pkg" / "mod.py").write_text("y = 2\n")
+        with WorktreeWorkspace(git_repo, seed="worktree") as ws:
+            assert ws.read_file("pkg/mod.py") == "y = 2\n"
+
+    def test_worktree_seed_replays_deletions(self, git_repo: Path) -> None:
+        """A file the user deleted must not reappear in the shadow."""
+        (git_repo / "doomed.py").write_text("gone soon\n")
+        _git(git_repo, "add", ".")
+        _git(git_repo, "commit", "-qm", "add doomed")
+        (git_repo / "doomed.py").unlink()
+
+        with WorktreeWorkspace(git_repo, seed="worktree") as ws:
+            assert "doomed.py" not in ws.list_files()
+
+    def test_worktree_seed_handles_paths_with_spaces(self, git_repo: Path) -> None:
+        (git_repo / "a file.py").write_text("spaced = 1\n")
+        with WorktreeWorkspace(git_repo, seed="worktree") as ws:
+            assert ws.read_file("a file.py") == "spaced = 1\n"
+
+    def test_default_seed_is_head(self, git_repo: Path) -> None:
+        """Existing callers must keep the old behavior."""
+        (git_repo / "main.py").write_text("print('uncommitted')\n")
+        with WorktreeWorkspace(git_repo) as ws:
+            assert ws.read_file("main.py") == "print('hello')\n"
+
+    def test_copy_fallback_always_reflects_working_tree(self, git_repo: Path) -> None:
+        """The non-git path copies the live tree, so seed is moot there."""
+        (git_repo / "main.py").write_text("print('uncommitted')\n")
+        with WorktreeWorkspace(git_repo, use_git=False, seed="head") as ws:
+            assert not ws.is_worktree
+            assert ws.read_file("main.py") == "print('uncommitted')\n"
+
+    def test_turn_two_builds_on_turn_one(self, git_repo: Path) -> None:
+        """The multi-turn invariant, end to end.
+
+        Turn 1 finalizes without committing; turn 2 must see its output rather
+        than reverting it.
+        """
+        with WorktreeWorkspace(git_repo, seed="worktree") as ws1:
+            ws1.write_file("main.py", "print('turn one')\n")
+            ws1.finalize(git_repo)
+        assert (git_repo / "main.py").read_text() == "print('turn one')\n"
+
+        with WorktreeWorkspace(git_repo, seed="worktree") as ws2:
+            assert ws2.read_file("main.py") == "print('turn one')\n"
+            ws2.write_file("second.py", "print('turn two')\n")
+            ws2.finalize(git_repo)
+
+        assert (git_repo / "main.py").read_text() == "print('turn one')\n"
+        assert (git_repo / "second.py").read_text() == "print('turn two')\n"
+
+
+class TestDirtyWorktreeGuard:
+    """finalize() must not silently destroy uncommitted work.
+
+    A HEAD-seeded shadow never contained the target's uncommitted changes, so
+    copying it back deletes them permanently — they were never committed, so git
+    cannot restore them either.
+    """
+
+    def test_head_seed_refuses_to_clobber_uncommitted_changes(self, git_repo: Path) -> None:
+        (git_repo / "main.py").write_text("print('precious uncommitted work')\n")
+
+        with WorktreeWorkspace(git_repo, seed="head") as ws:
+            ws.write_file("other.py", "x = 1\n")
+            with pytest.raises(DirtyWorktreeError, match="uncommitted changes"):
+                ws.finalize(git_repo)
+
+        # The user's work survived.
+        assert (git_repo / "main.py").read_text() == "print('precious uncommitted work')\n"
+
+    def test_head_seed_finalizes_when_clean(self, git_repo: Path) -> None:
+        with WorktreeWorkspace(git_repo, seed="head") as ws:
+            ws.write_file("main.py", "print('agent output')\n")
+            ws.finalize(git_repo)
+        assert (git_repo / "main.py").read_text() == "print('agent output')\n"
+
+    def test_worktree_seed_finalizes_despite_dirty_tree(self, git_repo: Path) -> None:
+        """A worktree-seeded shadow already contains the changes, so it is safe."""
+        (git_repo / "main.py").write_text("print('uncommitted')\n")
+
+        with WorktreeWorkspace(git_repo, seed="worktree") as ws:
+            assert ws.read_file("main.py") == "print('uncommitted')\n"
+            ws.write_file("added.py", "y = 2\n")
+            ws.finalize(git_repo)
+
+        assert (git_repo / "main.py").read_text() == "print('uncommitted')\n"
+        assert (git_repo / "added.py").read_text() == "y = 2\n"
+
+    def test_untracked_files_do_not_block_finalize(self, git_repo: Path) -> None:
+        """Untracked files are not clobbered by finalize, so they are not 'dirty'."""
+        (git_repo / "scratch.txt").write_text("notes\n")
+        with WorktreeWorkspace(git_repo, seed="head") as ws:
+            ws.write_file("main.py", "print('agent output')\n")
+            ws.finalize(git_repo)
+        assert (git_repo / "main.py").read_text() == "print('agent output')\n"
+
+    def test_non_git_target_is_not_blocked(self, repo: Path) -> None:
+        """Without git there is nothing to compare against; do not break plain dirs."""
+        with WorktreeWorkspace(repo, use_git=False) as ws:
+            ws.write_file("main.py", "print('changed')\n")
+            ws.finalize(repo)
+        assert (repo / "main.py").read_text() == "print('changed')\n"
