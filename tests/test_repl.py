@@ -470,3 +470,89 @@ class TestUndoCommand:
             run_repl(repo, _config(), console=console)
 
         assert (repo / "a.py").read_text() == "x = 1\n"
+
+
+class TestConversationWiring:
+    """The turn-to-turn plumbing: history in, events out."""
+
+    def test_first_turn_gets_no_history(self, repo: Path) -> None:
+        """A fresh session must look exactly like the pre-conversation behavior."""
+        console = _console(["first", "/exit"])
+        with patch("qqcode.repl.run_task", return_value=_result()) as rt:
+            run_repl(repo, _config(), console=console)
+        assert rt.call_args.kwargs["history"] == ""
+
+    def test_second_turn_receives_the_first(self, repo: Path) -> None:
+        """Without this, "that change was wrong" has no referent."""
+        console = _console(["make it return hello", "second", "/exit"])
+        with patch("qqcode.repl.run_task", return_value=_result()) as rt:
+            run_repl(repo, _config(), console=console)
+
+        history = rt.call_args.kwargs["history"]
+        assert "make it return hello" in history
+
+    def test_history_carries_the_agents_own_summary(self, repo: Path) -> None:
+        console = _console(["first", "second", "/exit"])
+        with patch("qqcode.repl.run_task", return_value=_result()) as rt:
+            run_repl(repo, _config(), console=console)
+
+        assert "did the thing" in rt.call_args.kwargs["history"]
+
+    def test_resumed_session_carries_prior_history(self, repo: Path, tmp_path: Path) -> None:
+        """Resuming must restore the conversation, not just the turn count."""
+        from qqcode.memory.session import SessionStore, TurnRecord
+
+        store = SessionStore(tmp_path / "s.db")
+        prior = SessionRecord(repo=str(repo.resolve()))
+        prior.turns.append(
+            TurnRecord(task="earlier request", outcome="accepted", summary="earlier summary")
+        )
+        store.save(prior)
+
+        with patch("qqcode.repl.run_task", return_value=_result()) as rt:
+            run_repl(repo, _config(), console=_console(["next", "/exit"]),
+                     session_store=store, resume=prior)
+
+        history = rt.call_args.kwargs["history"]
+        assert "earlier request" in history
+        assert "earlier summary" in history
+        store.close()
+
+    def test_an_event_renderer_is_supplied(self, repo: Path) -> None:
+        console = _console(["task", "/exit"])
+        with patch("qqcode.repl.run_task", return_value=_result()) as rt:
+            run_repl(repo, _config(), console=console)
+        assert callable(rt.call_args.kwargs["on_event"])
+
+    def test_tool_events_are_rendered(self, repo: Path) -> None:
+        """The visibility payoff: the person sees which files were touched."""
+        from qqcode.events import AgentEvent
+
+        console = _console(["task", "/exit"])
+
+        def emitting(*a: Any, **kw: Any) -> RunResult:
+            render = kw["on_event"]
+            render(AgentEvent(kind="tool_end", tool="read_file", detail="calc.py"))
+            render(AgentEvent(kind="tool_end", tool="run_command",
+                              detail="pytest -q", is_error=True))
+            return _result()
+
+        with patch("qqcode.repl.run_task", side_effect=emitting):
+            run_repl(repo, _config(), console=console)
+
+        out = console.file.getvalue()  # type: ignore[attr-defined]
+        assert "calc.py" in out
+        assert "pytest -q" in out
+
+    def test_summary_is_persisted_for_later_turns(self, repo: Path, tmp_path: Path) -> None:
+        from qqcode.memory.session import SessionStore
+
+        store = SessionStore(tmp_path / "s.db")
+        with patch("qqcode.repl.run_task", return_value=_result()):
+            session = run_repl(repo, _config(), console=_console(["task", "/exit"]),
+                               session_store=store)
+
+        reloaded = store.load(session.id)
+        assert reloaded is not None
+        assert reloaded.turns[0].summary == "did the thing"
+        store.close()

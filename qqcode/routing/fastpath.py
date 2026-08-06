@@ -101,6 +101,9 @@ class FastPathInput:
     # Expected touched files, from L0/L1. Empty means the diff check cannot be
     # enforced — see `execute_fastpath` for why that is not a silent pass.
     files_hint: tuple[str, ...] = ()
+    # Digest of earlier turns. Empty in batch mode. FastPath is a single call,
+    # so this is its only chance to learn what "that change" refers to.
+    history: str = ""
 
 
 PATCH_OUTPUT_SPEC = OutputSpec(
@@ -180,7 +183,12 @@ creating them from scratch.
 """
 
 
-def _build_messages(task: str, skill_bodies: list[str], file_contents: dict[str, str]) -> list[Msg]:
+def _build_messages(
+    task: str,
+    skill_bodies: list[str],
+    file_contents: dict[str, str],
+    history: str = "",
+) -> list[Msg]:
     """Assemble the prompt.
 
     Skill bodies go after the cache breakpoint. Putting per-task skill text
@@ -201,6 +209,12 @@ def _build_messages(task: str, skill_bodies: list[str], file_contents: dict[str,
         tail.append("## Current file contents\n")
         for path, content in sorted(file_contents.items()):
             tail.append(f"### {path}\n```\n{content}\n```")
+
+    # After the breakpoint with the skills, and before the task: history is
+    # per-conversation, so putting it in the cached prefix would poison the
+    # prefix for every other task.
+    if history:
+        tail.append(history)
 
     tail.append(f"## Task\n{task}")
     messages.append(Msg(role=Role.USER, content=[TextContent(text=t) for t in tail]))
@@ -234,7 +248,7 @@ def execute_fastpath(
     """
     _, skills = inp.skill_index.select("fastpath", task=inp.task, paths=inp.files_hint)
     file_contents = _prefetch_files(inp.files_hint, workspace)
-    messages = _build_messages(inp.task, [s.body for s in skills], file_contents)
+    messages = _build_messages(inp.task, [s.body for s in skills], file_contents, inp.history)
 
     try:
         completion = client.invoke(

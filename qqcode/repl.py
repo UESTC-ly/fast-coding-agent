@@ -25,6 +25,8 @@ from rich.console import Console
 from rich.syntax import Syntax
 
 from qqcode.config import Config
+from qqcode.conversation import build_context
+from qqcode.events import AgentEvent, EventCallback
 from qqcode.memory.session import SessionRecord, SessionStore, TurnRecord
 from qqcode.memory.trace import TraceStore
 from qqcode.orchestrator import Mode, RunResult, run_task
@@ -123,6 +125,39 @@ def make_confirm(
     return confirm
 
 
+def make_event_renderer(console: Console) -> EventCallback:
+    """Build the callback that shows the agent's work as it happens.
+
+    Only `tool_end` is rendered, not `tool_start`: the graph is synchronous, so a
+    start line would be followed by its own end line with nothing in between,
+    doubling the output to say the same thing. Errors are marked, because a
+    failing tool call is the signal that the agent is about to change approach —
+    or to get stuck.
+    """
+    icons = {
+        "read_file": "read",
+        "list_files": "list",
+        "grep": "grep",
+        "write_file": "write",
+        "edit_file": "edit",
+        "run_command": "run",
+        "read_skill": "skill",
+        "read_artifact": "artifact",
+        "spawn_subagent": "spawn",
+    }
+
+    def render(event: AgentEvent) -> None:
+        if event.kind == "tool_end":
+            label = icons.get(event.tool, event.tool)
+            mark = "[red]✗[/red]" if event.is_error else "[green]·[/green]"
+            detail = f" [dim]{event.detail}[/dim]" if event.detail else ""
+            console.print(f"  {mark} [cyan]{label}[/cyan]{detail}")
+        elif event.kind == "assistant_text":
+            console.print(f"  [dim]{event.detail}[/dim]")
+
+    return render
+
+
 def _describe(result: RunResult) -> str:
     if result.rejected:
         return "rejected"
@@ -215,6 +250,8 @@ def run_repl(
                 model=model,
                 confirm=confirm,
                 seed="worktree",      # turn N builds on turn N-1
+                history=build_context(session.turns).text,
+                on_event=make_event_renderer(console),
             )
         except KeyboardInterrupt:
             # The shadow was discarded by the workspace context manager and
@@ -243,6 +280,7 @@ def run_repl(
                 mode_used=result.mode_used,
                 changed_files=tuple(sorted(result.changed_files)),
                 tokens=result.ledger.summary().get("automatic_total", 0),
+                summary=result.reasoning,
             )
         )
         _report_turn(result, outcome, console)

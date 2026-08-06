@@ -14,6 +14,7 @@ from typing import Literal
 from qqcode.acceptance import AcceptanceHarness, all_passed, filter_acceptance_paths, first_failure
 from qqcode.agents.full_agent import FullAgentInput, execute_full_agent
 from qqcode.config import Config
+from qqcode.events import EventCallback
 from qqcode.memory.trace import TraceRecord, TraceStore
 from qqcode.models.billing import BilledClient
 from qqcode.models.factory import build_client, uniform_tiers
@@ -61,6 +62,8 @@ def run_task(
     trace_store: TraceStore | None = None,
     confirm: ConfirmCallback | None = None,
     seed: Seed = "head",
+    history: str = "",
+    on_event: EventCallback | None = None,
 ) -> RunResult:
     """Run a task against a repository.
 
@@ -113,6 +116,7 @@ def run_task(
             task, repo, client, ledger, skill_index, repo,
             harness=harness, dry_run=dry_run, max_turns=max_turns,
             escalation_context="", confirm=confirm, seed=seed,
+            history=history, on_event=on_event,
         )
         _finalise_trace(record, result, ledger, time.monotonic() - t0, trace_store)
         return result
@@ -123,7 +127,7 @@ def run_task(
             record.route_decision = "fastpath"
         fp_result, esc = _try_fastpath(
             task, repo, client, skill_index, (), harness, dry_run, record,
-            confirm=confirm, seed=seed,
+            confirm=confirm, seed=seed, history=history,
         )
         if fp_result is not None:
             _finalise_trace(record, fp_result, ledger, time.monotonic() - t0, trace_store)
@@ -153,7 +157,7 @@ def run_task(
     if routing.decision == RoutingDecision.FASTPATH:
         fp_result, esc = _try_fastpath(
             task, repo, client, skill_index, routing.files_hint, harness, dry_run, record,
-            confirm=confirm, seed=seed,
+            confirm=confirm, seed=seed, history=history,
         )
         if fp_result is not None:
             _finalise_trace(record, fp_result, ledger, time.monotonic() - t0, trace_store)
@@ -165,6 +169,7 @@ def run_task(
         task, repo, client, ledger, skill_index, repo,
         harness=harness, dry_run=dry_run, max_turns=max_turns,
         escalation_context=esc, confirm=confirm, seed=seed,
+        history=history, on_event=on_event,
     )
     _finalise_trace(record, result, ledger, time.monotonic() - t0, trace_store)
     return result
@@ -216,6 +221,7 @@ def _try_fastpath(
     *,
     confirm: ConfirmCallback | None = None,
     seed: Seed = "head",
+    history: str = "",
 ) -> tuple[RunResult | None, str]:
     """Attempt FastPath in a fresh shadow workspace.
 
@@ -233,6 +239,7 @@ def _try_fastpath(
             skill_index=skill_index,
             tool_registry=default_registry(),
             files_hint=files_hint,
+            history=history,
         )
         fp = execute_fastpath(inp, workspace, client, harness=harness)
 
@@ -307,6 +314,8 @@ def _run_fullagent(
     escalation_context: str,
     confirm: ConfirmCallback | None = None,
     seed: Seed = "head",
+    history: str = "",
+    on_event: EventCallback | None = None,
 ) -> RunResult:
     with WorktreeWorkspace(repo, use_git=True, seed=seed) as workspace:
         baseline = workspace.snapshot()
@@ -318,6 +327,8 @@ def _run_fullagent(
             escalation_context=escalation_context,
             max_turns=max_turns,
             model_tier=ModelTier.BALANCED,
+            history=history,
+            on_event=on_event,
         )
         fa = execute_full_agent(inp, workspace, client)
 

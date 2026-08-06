@@ -58,6 +58,10 @@ class TurnRecord:
     mode_used: str = ""
     changed_files: tuple[str, ...] = ()
     tokens: int = 0
+    # The agent's closing summary. Carried so a later turn can be told what the
+    # previous one concluded — "that approach was wrong, try another" is
+    # meaningless to a model that never saw the approach.
+    summary: str = ""
 
     def _as_json(self) -> dict[str, Any]:
         d = asdict(self)
@@ -72,6 +76,8 @@ class TurnRecord:
             mode_used=d.get("mode_used", ""),
             changed_files=tuple(d.get("changed_files", ())),
             tokens=d.get("tokens", 0),
+            # .get for forward compat with sessions stored before this field existed
+            summary=d.get("summary", ""),
         )
 
 
