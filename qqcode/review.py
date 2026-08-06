@@ -30,6 +30,26 @@ class FileDiff:
     status: str          # "added" | "modified" | "deleted"
     diff_text: str       # unified diff, or a summary when too large
     truncated: bool = False
+    # Pre-change state, captured while the source is still untouched. This is
+    # what makes a per-turn undo possible without relying on git, which cannot
+    # help when the change was never committed.
+    before_exists: bool = False
+    before_text: str | None = None   # None with before_exists=True => binary
+    # Post-change state, read from the shadow before it is finalized. Undo
+    # compares this against what is on disk to notice later edits; capturing it
+    # here is exact, where reconstructing it from `diff_text` would not be.
+    after_exists: bool = False
+    after_text: str | None = None
+
+    @property
+    def before_is_restorable(self) -> bool:
+        """Whether undo can faithfully put this file back.
+
+        False for binary or undecodable files: their prior bytes were never
+        captured, so "restoring" them would write mojibake or delete a file
+        that did exist.
+        """
+        return not self.before_exists or self.before_text is not None
 
 
 @dataclass(frozen=True)
@@ -78,10 +98,15 @@ def build_review(
 def _diff_one(rel: str, before: Path, after: Path) -> FileDiff:
     old = _read(before)
     new = _read(after)
+    # Existence is checked separately from readability: `_read` returns None for
+    # both "absent" and "binary", but undo must tell them apart — one means
+    # delete, the other means do not touch.
+    before_exists = before.is_file()
+    after_exists = after.is_file()
 
-    if old is None and new is not None:
+    if not before_exists and after_exists:
         status = "added"
-    elif old is not None and new is None:
+    elif before_exists and not after_exists:
         status = "deleted"
     else:
         status = "modified"
@@ -104,9 +129,21 @@ def _diff_one(rel: str, before: Path, after: Path) -> FileDiff:
             status=status,
             diff_text=f"{kept}\n... {dropped} more diff lines omitted ...",
             truncated=True,
+            before_exists=before_exists,
+            before_text=old,
+            after_exists=after_exists,
+            after_text=new,
         )
 
-    return FileDiff(path=rel, status=status, diff_text="".join(lines))
+    return FileDiff(
+        path=rel,
+        status=status,
+        diff_text="".join(lines),
+        before_exists=before_exists,
+        before_text=old,
+        after_exists=after_exists,
+        after_text=new,
+    )
 
 
 def _read(path: Path) -> str | None:

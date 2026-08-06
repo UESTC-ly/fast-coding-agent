@@ -18,6 +18,7 @@ untouched.
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 from rich.console import Console
@@ -28,9 +29,13 @@ from qqcode.memory.session import SessionRecord, SessionStore, TurnRecord
 from qqcode.memory.trace import TraceStore
 from qqcode.orchestrator import Mode, RunResult, run_task
 from qqcode.review import ChangeReview, ConfirmCallback
+from qqcode.undo import UndoConflictError, UndoSnapshot, apply_undo, plan_undo
 
 # Typed at the prompt to leave the session.
 EXIT_COMMANDS = frozenset({"/exit", "/quit", "exit", "quit"})
+
+# Reverses the most recent applied turn.
+UNDO_COMMANDS = frozenset({"/undo"})
 
 # Diff lines above this count are collapsed in the terminal. The full text stays
 # in the review object; this only bounds what is printed at once.
@@ -87,8 +92,16 @@ def render_review(review: ChangeReview, console: Console) -> None:
             console.print(f"[dim]... {hidden} more lines ...[/dim]")
 
 
-def make_confirm(console: Console) -> ConfirmCallback:
-    """Build the confirm callback that asks the person to accept a change."""
+def make_confirm(
+    console: Console,
+    on_accept: Callable[[ChangeReview], None] | None = None,
+) -> ConfirmCallback:
+    """Build the confirm callback that asks the person to accept a change.
+
+    Args:
+        on_accept: Notified with the review the user approved, before it is
+            finalized. The REPL uses this to capture an undo snapshot.
+    """
 
     def confirm(review: ChangeReview) -> bool:
         render_review(review, console)
@@ -100,7 +113,12 @@ def make_confirm(console: Console) -> ConfirmCallback:
         answer = console.input(
             "[bold]Apply these changes?[/bold] [dim]([green]y[/green]/[red]n[/red])[/dim] "
         )
-        return answer.strip().lower() in {"y", "yes"}
+        accepted = answer.strip().lower() in {"y", "yes"}
+        if accepted and on_accept is not None:
+            # Captured here because this is the last point at which the review —
+            # and with it both sides of every changed file — is in hand.
+            on_accept(review)
+        return accepted
 
     return confirm
 
@@ -134,7 +152,15 @@ def run_repl(
             kept so the undo anchor still points at the original start.
     """
     console = console or Console()
-    confirm = make_confirm(console)
+
+    # Undo history for this process only. Snapshots hold full file contents, so
+    # persisting them would grow sessions.db with the size of the repository;
+    # a resumed session therefore starts with nothing to undo, which the
+    # command says plainly rather than failing obscurely.
+    undo_stack: list[UndoSnapshot] = []
+    pending: list[ChangeReview] = []
+
+    confirm = make_confirm(console, on_accept=pending.append)
 
     session = resume or SessionRecord(
         repo=str(repo.resolve()), base_commit=current_commit(repo)
@@ -146,7 +172,8 @@ def run_repl(
         console.print(f"[bold]qqcode[/bold] — conversational mode  [dim]({repo})[/dim]")
         console.print(f"[dim]session {session.short_id}[/dim]")
     console.print(
-        "[dim]Describe a task, or /exit to leave. Ctrl-C cancels the current turn.[/dim]"
+        "[dim]Describe a task, /undo to reverse the last one, /exit to leave. "
+        "Ctrl-C cancels the current turn.[/dim]"
     )
 
     def record(turn: TurnRecord) -> None:
@@ -170,7 +197,11 @@ def run_repl(
             continue
         if task.lower() in EXIT_COMMANDS:
             break
+        if task.lower() in UNDO_COMMANDS:
+            _handle_undo(undo_stack, repo, session, console, session_store)
+            continue
 
+        pending.clear()
         try:
             result = run_task(
                 task,
@@ -199,6 +230,12 @@ def run_repl(
             continue
 
         outcome = _describe(result)
+        if outcome == "accepted" and pending:
+            # Only an applied turn is undoable. A rejected or failed one never
+            # reached the repository, so there is nothing to reverse.
+            undo_stack.append(
+                UndoSnapshot(task=task, files=pending[-1].diffs)
+            )
         record(
             TurnRecord(
                 task=task,
@@ -212,6 +249,74 @@ def run_repl(
 
     _report_session(session, console)
     return session
+
+
+def _handle_undo(
+    undo_stack: list[UndoSnapshot],
+    repo: Path,
+    session: SessionRecord,
+    console: Console,
+    session_store: SessionStore | None,
+) -> None:
+    """Reverse the most recent applied turn, or explain why it cannot."""
+    if not undo_stack:
+        console.print(
+            "[yellow]Nothing to undo.[/yellow] "
+            "[dim]Only turns applied in this process can be reversed.[/dim]"
+        )
+        return
+
+    snapshot = undo_stack[-1]
+    plan = plan_undo(snapshot, repo)
+
+    if plan.is_empty and not plan.unrestorable:
+        console.print("[yellow]That turn changed nothing to reverse.[/yellow]")
+        undo_stack.pop()
+        return
+
+    console.print(f"\n[bold]Undo:[/bold] {snapshot.task}")
+    for path in plan.to_restore:
+        console.print(f"  [cyan]~[/cyan] restore {path}")
+    for path in plan.to_delete:
+        console.print(f"  [cyan]-[/cyan] delete {path}")
+    for path in plan.unrestorable:
+        console.print(f"  [dim]![/dim] {path} [dim](binary — cannot restore)[/dim]")
+
+    force = False
+    if plan.conflicts:
+        console.print(
+            f"\n[yellow]Changed since that turn:[/yellow] {', '.join(plan.conflicts)}"
+        )
+        console.print("[dim]Undoing would discard those later edits.[/dim]")
+        answer = console.input("[bold]Undo anyway?[/bold] [dim](y/n)[/dim] ")
+        if answer.strip().lower() not in {"y", "yes"}:
+            console.print("[dim]Left unchanged.[/dim]")
+            return
+        force = True
+
+    try:
+        applied = apply_undo(snapshot, repo, force=force)
+    except UndoConflictError as exc:
+        console.print(f"[red]Undo refused:[/red] {exc}")
+        return
+    except OSError as exc:
+        # Surfaced, not swallowed: a partial undo is worth knowing about.
+        console.print(f"[red]Undo failed:[/red] {type(exc).__name__}: {exc}")
+        return
+
+    undo_stack.pop()
+    session.turns.append(
+        TurnRecord(task=f"/undo {snapshot.task}", outcome="undone")
+    )
+    if session_store is not None:
+        session_store.save(session)
+
+    count = len(applied.to_restore) + len(applied.to_delete)
+    console.print(f"[green]↩ Reverted[/green] [dim]({count} file(s))[/dim]")
+    if applied.unrestorable:
+        console.print(
+            f"[yellow]Left in place:[/yellow] {', '.join(applied.unrestorable)}"
+        )
 
 
 def _report_turn(result: RunResult, outcome: str, console: Console) -> None:

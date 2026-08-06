@@ -371,3 +371,102 @@ class TestResume:
     def test_non_git_repo_yields_empty_base_commit(self, repo: Path) -> None:
         session = run_repl(repo, _config(), console=_console(["/exit"]))
         assert session.base_commit == ""
+
+
+class TestUndoCommand:
+    """/undo reverses the last applied turn, through the real REPL loop."""
+
+    def _applied(self, repo: Path, path: str = "a.py") -> Any:
+        """A run_task stand-in that writes to the repo like finalize would."""
+        def fake(task: str, *a: Any, **kw: Any) -> RunResult:
+            confirm = kw["confirm"]
+            before = (repo / path).read_text() if (repo / path).is_file() else None
+            after = f"# {task}\n"
+            review = ChangeReview(
+                task=task, mode_used="fastpath", reasoning="r",
+                diffs=(FileDiff(
+                    path=path, status="modified", diff_text=f"+{after}",
+                    before_exists=before is not None, before_text=before,
+                    after_exists=True, after_text=after,
+                ),),
+            )
+            if not confirm(review):
+                return _result(success=False, rejected=True, changed=(path,))
+            (repo / path).write_text(after)      # stands in for finalize
+            return _result(changed=(path,))
+        return fake
+
+    def test_undo_reverts_the_last_turn(self, repo: Path) -> None:
+        console = _console(["do it", "y", "/undo", "/exit"])
+        with patch("qqcode.repl.run_task", side_effect=self._applied(repo)):
+            run_repl(repo, _config(), console=console)
+
+        assert (repo / "a.py").read_text() == "x = 1\n"      # back to the fixture
+        assert "Reverted" in console.file.getvalue()  # type: ignore[attr-defined]
+
+    def test_undo_with_no_history_says_so(self, repo: Path) -> None:
+        console = _console(["/undo", "/exit"])
+        run_repl(repo, _config(), console=console)
+        assert "Nothing to undo" in console.file.getvalue()  # type: ignore[attr-defined]
+
+    def test_undo_is_recorded_as_a_turn(self, repo: Path) -> None:
+        console = _console(["do it", "y", "/undo", "/exit"])
+        with patch("qqcode.repl.run_task", side_effect=self._applied(repo)):
+            session = run_repl(repo, _config(), console=console)
+
+        assert [t.outcome for t in session.turns] == ["accepted", "undone"]
+
+    def test_only_applied_turns_are_undoable(self, repo: Path) -> None:
+        """A rejected turn never reached the repo, so there is nothing to undo."""
+        console = _console(["do it", "n", "/undo", "/exit"])
+        with patch("qqcode.repl.run_task", side_effect=self._applied(repo)):
+            run_repl(repo, _config(), console=console)
+
+        assert "Nothing to undo" in console.file.getvalue()  # type: ignore[attr-defined]
+        assert (repo / "a.py").read_text() == "x = 1\n"
+
+    def test_undo_only_reaches_back_one_turn(self, repo: Path) -> None:
+        console = _console(["first", "y", "second", "y", "/undo", "/exit"])
+        with patch("qqcode.repl.run_task", side_effect=self._applied(repo)):
+            run_repl(repo, _config(), console=console)
+
+        # Reverses "second", leaving "first" in place.
+        assert (repo / "a.py").read_text() == "# first\n"
+
+    def test_repeated_undo_walks_back_the_stack(self, repo: Path) -> None:
+        console = _console(["first", "y", "second", "y", "/undo", "/undo", "/exit"])
+        with patch("qqcode.repl.run_task", side_effect=self._applied(repo)):
+            run_repl(repo, _config(), console=console)
+
+        assert (repo / "a.py").read_text() == "x = 1\n"
+
+    def test_undo_asks_before_discarding_a_later_edit(self, repo: Path) -> None:
+        """A hand edit after the turn must not vanish silently."""
+        console = _console(["do it", "y", "/undo", "n", "/exit"])
+        applied = self._applied(repo)
+
+        def then_edit(task: str, *a: Any, **kw: Any) -> RunResult:
+            out = applied(task, *a, **kw)
+            (repo / "a.py").write_text("hand-edited afterwards\n")
+            return out
+
+        with patch("qqcode.repl.run_task", side_effect=then_edit):
+            run_repl(repo, _config(), console=console)
+
+        out = console.file.getvalue()  # type: ignore[attr-defined]
+        assert "Changed since that turn" in out
+        assert (repo / "a.py").read_text() == "hand-edited afterwards\n"
+
+    def test_confirmed_conflict_undo_proceeds(self, repo: Path) -> None:
+        console = _console(["do it", "y", "/undo", "y", "/exit"])
+        applied = self._applied(repo)
+
+        def then_edit(task: str, *a: Any, **kw: Any) -> RunResult:
+            out = applied(task, *a, **kw)
+            (repo / "a.py").write_text("hand-edited afterwards\n")
+            return out
+
+        with patch("qqcode.repl.run_task", side_effect=then_edit):
+            run_repl(repo, _config(), console=console)
+
+        assert (repo / "a.py").read_text() == "x = 1\n"
