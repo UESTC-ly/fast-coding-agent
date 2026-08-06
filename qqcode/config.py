@@ -33,6 +33,12 @@ class Config:
     openai: ProviderConfig | None
     default_provider: str
     debug: bool = False
+    # Pins every tier to one model when set, equivalent to passing --model on
+    # every invocation. Exists because a proxied or self-hosted endpoint often
+    # serves a single model under its own name, so the adapters' per-tier
+    # defaults (gpt-5, claude-sonnet-5) do not resolve there at all. None keeps
+    # those defaults, which are correct against the vendors' own endpoints.
+    default_model: str | None = None
 
     @classmethod
     def from_env(cls, env_path: Path | None = None) -> Config:
@@ -77,11 +83,17 @@ class Config:
 
         debug = os.getenv("DEBUG", "false").lower() in {"1", "true", "yes"}
 
+        # Empty or whitespace-only is treated as unset: an env file with a bare
+        # `DEFAULT_MODEL=` should fall back to the adapter defaults rather than
+        # pin every tier to "".
+        default_model = (os.getenv("DEFAULT_MODEL") or "").strip() or None
+
         return cls(
             anthropic=anthropic,
             openai=openai,
             default_provider=default_provider,
             debug=debug,
+            default_model=default_model,
         )
 
     @staticmethod

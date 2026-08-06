@@ -91,7 +91,10 @@ def run_task(
             "worktree" so turn N builds on turn N-1's uncommitted output.
     """
     t0 = time.monotonic()
-    tier_models = uniform_tiers(model) if model else None
+    # An explicit --model beats the configured default: the flag is the more
+    # specific signal, and benchmarking depends on being able to override.
+    effective_model = model or config.default_model
+    tier_models = uniform_tiers(effective_model) if effective_model else None
     client, ledger = build_client(
         config,
         provider=provider,

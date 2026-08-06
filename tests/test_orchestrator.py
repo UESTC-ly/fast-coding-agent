@@ -457,3 +457,52 @@ class TestSeedAcrossTurns:
 
         # Turn 1's work is intact precisely because the guard fired.
         assert (repo / "app.py").read_text() == 'def greet(): return "hi"\n'
+
+
+class TestDefaultModelWiring:
+    """config.default_model must actually reach the client, not just parse.
+
+    Config-level tests only prove the value was read from the env file. Without
+    these, dropping the orchestrator's fallback is invisible to the suite.
+    """
+
+    def _config(self, default_model: str | None) -> Any:
+        from qqcode.config import Config, ProviderConfig
+        return Config(
+            anthropic=ProviderConfig(api_key="fake", base_url=None),
+            openai=None,
+            default_provider="anthropic",
+            default_model=default_model,
+        )
+
+    def _captured_tiers(self, config: Any, model: str = "") -> Any:
+        """Run one task, returning the tier_models build_client was given."""
+        from qqcode.orchestrator import run_task
+
+        client, _ = make_client([patch_ok()])
+        seen: dict[str, Any] = {}
+
+        def fake_build(cfg: Any, **kw: Any) -> Any:
+            seen["tier_models"] = kw.get("tier_models")
+            return client, client._ledger  # noqa: SLF001
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "main.py").write_text("def main(): pass\n")
+            with patch("qqcode.orchestrator.build_client", side_effect=fake_build):
+                run_task(task="t", repo=repo, config=config, mode="fast",
+                         dry_run=True, model=model or None)
+        return seen["tier_models"]
+
+    def test_default_model_pins_every_tier(self) -> None:
+        tiers = self._captured_tiers(self._config("proxy-model-id"))
+        assert tiers is not None
+        assert set(tiers.values()) == {"proxy-model-id"}
+
+    def test_explicit_model_overrides_the_default(self) -> None:
+        """--model is the more specific signal; benchmarking depends on it."""
+        tiers = self._captured_tiers(self._config("proxy-model-id"), model="pinned-id")
+        assert set(tiers.values()) == {"pinned-id"}
+
+    def test_no_default_leaves_adapter_defaults_alone(self) -> None:
+        assert self._captured_tiers(self._config(None)) is None

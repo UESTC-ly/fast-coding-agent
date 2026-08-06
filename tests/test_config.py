@@ -20,6 +20,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for var in (
         "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
         "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "DEFAULT_PROVIDER",
+        "DEFAULT_MODEL",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -93,3 +94,29 @@ class TestGlobalFallback:
         config = Config.from_env(env_path=explicit)
         assert config.anthropic is not None
         assert config.anthropic.api_key == "from-explicit"
+
+
+class TestDefaultModel:
+    """DEFAULT_MODEL lets one config point qqcode at a backend whose model ids
+    differ from the built-in defaults, without passing --model every time."""
+
+    def test_absent_by_default(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("qqcode.config.GLOBAL_CONFIG_DIR", tmp_path / "nowhere")
+        env = tmp_path / ".env"
+        env.write_text("ANTHROPIC_API_KEY=k\n")
+        assert Config.from_env(env).default_model is None
+
+    def test_read_from_env_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("qqcode.config.GLOBAL_CONFIG_DIR", tmp_path / "nowhere")
+        env = tmp_path / ".env"
+        env.write_text("ANTHROPIC_API_KEY=k\nDEFAULT_MODEL=some-model-id\n")
+        assert Config.from_env(env).default_model == "some-model-id"
+
+    def test_blank_is_treated_as_unset(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An empty value must not pin every tier to the empty string."""
+        monkeypatch.setattr("qqcode.config.GLOBAL_CONFIG_DIR", tmp_path / "nowhere")
+        env = tmp_path / ".env"
+        env.write_text("ANTHROPIC_API_KEY=k\nDEFAULT_MODEL=\n")
+        assert Config.from_env(env).default_model is None
