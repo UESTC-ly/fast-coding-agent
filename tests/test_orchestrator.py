@@ -29,7 +29,6 @@ from qqcode.models.protocol import (
 from qqcode.skills.index import SkillIndex
 from qqcode.workspace.worktree import WorktreeWorkspace
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -288,3 +287,173 @@ class TestRunTaskIntegration:
         records = store.all()
         store.close()
         assert records[0].finish_summary == "patched the parser"
+
+
+# ---------------------------------------------------------------------------
+# confirm= : the human verdict source
+# ---------------------------------------------------------------------------
+
+def _run_confirm(
+    repo: Path,
+    script: list[Completion],
+    confirm: Any,
+    *,
+    mode: str = "fast",
+    task: str = "test task",
+) -> Any:
+    """Run with a real finalize (dry_run=False) so acceptance is observable."""
+    from qqcode.config import Config, ProviderConfig
+    from qqcode.orchestrator import run_task
+
+    client, _ = make_client(script)
+    config = Config(anthropic=ProviderConfig(api_key="fake", base_url=None),
+                    openai=None, default_provider="anthropic")
+    with patch("qqcode.orchestrator.build_client",
+               return_value=(client, client._ledger)):  # noqa: SLF001
+        return run_task(task=task, repo=repo, config=config, mode=mode,
+                        dry_run=False, confirm=confirm)
+
+
+class TestConfirmCallback:
+    """The third gate condition gains a human variant without losing the others."""
+
+    def test_none_confirm_finalizes_as_before(self, repo: Path) -> None:
+        """confirm=None must behave exactly like the batch path."""
+        result = _run_confirm(repo, [patch_ok()], None)
+        assert result.success
+        assert not result.rejected
+        assert '"""Module."""' in (repo / "main.py").read_text()
+
+    def test_approval_finalizes(self, repo: Path) -> None:
+        seen: list[Any] = []
+
+        def approve(review: Any) -> bool:
+            seen.append(review)
+            return True
+
+        result = _run_confirm(repo, [patch_ok()], approve)
+        assert result.success
+        assert not result.rejected
+        assert '"""Module."""' in (repo / "main.py").read_text()
+        assert len(seen) == 1
+        assert seen[0].changed_files == ("main.py",)
+
+    def test_rejection_does_not_touch_the_repo(self, repo: Path) -> None:
+        before = (repo / "main.py").read_text()
+        result = _run_confirm(repo, [patch_ok()], lambda _r: False)
+
+        assert not result.success
+        assert result.rejected
+        assert result.finish_reason == "rejected"
+        assert (repo / "main.py").read_text() == before
+
+    def test_review_carries_a_readable_diff(self, repo: Path) -> None:
+        captured: list[Any] = []
+        _run_confirm(repo, [patch_ok()], lambda r: captured.append(r) or False)
+
+        review = captured[0]
+        assert review.task == "test task"
+        assert review.mode_used == "fastpath"
+        assert not review.is_empty()
+        diff = review.diffs[0]
+        assert diff.status == "modified"
+        assert "+++ b/main.py" in diff.diff_text
+        assert '+"""Module."""' in diff.diff_text
+
+    def test_rejection_on_fullagent_path(self, repo: Path) -> None:
+        before = (repo / "main.py").read_text()
+        result = _run_confirm(
+            repo,
+            [fa_write_file("out.txt"), fa_finish("wrote it")],
+            lambda _r: False,
+            mode="full",
+        )
+        assert result.rejected
+        assert result.finish_reason == "rejected"
+        assert not (repo / "out.txt").exists()
+        assert (repo / "main.py").read_text() == before
+
+    def test_approval_on_fullagent_path(self, repo: Path) -> None:
+        result = _run_confirm(
+            repo,
+            [fa_write_file("out.txt"), fa_finish("wrote it")],
+            lambda _r: True,
+            mode="full",
+        )
+        assert result.success
+        assert (repo / "out.txt").read_text() == "result\n"
+
+    def test_objective_failure_never_reaches_the_user(self, repo: Path) -> None:
+        """A change that fails an objective condition is not offered for review."""
+        asked: list[Any] = []
+        result = _run_confirm(
+            repo, [patch_declined()], lambda r: asked.append(r) or True
+        )
+        assert not result.success
+        assert not result.rejected          # declined, not rejected
+        assert asked == []                  # the human was never consulted
+
+
+class TestSeedAcrossTurns:
+    """Two consecutive turns, the real multi-turn invariant.
+
+    Turn 2 touches a different file than turn 1 and never commits. With
+    seed="worktree" turn 1's output survives; with seed="head" the second
+    finalize would clobber it, which the dirty guard now refuses outright.
+    """
+
+    def _git_repo(self, tmp_path: Path) -> Path:
+        import subprocess
+        root = tmp_path / "r"
+        root.mkdir()
+        (root / "app.py").write_text("def greet(): pass\n")
+        env = {
+            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+            "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+        }
+        for cmd in (["git", "init", "-q"], ["git", "add", "."], ["git", "commit", "-qm", "i"]):
+            subprocess.run(cmd, cwd=root, check=True, capture_output=True, env=env)
+        return root
+
+    def _turn(self, repo: Path, path: str, content: str, seed: str) -> Any:
+        from qqcode.config import Config, ProviderConfig
+        from qqcode.orchestrator import run_task
+
+        completion = Completion(
+            content=[ToolUseContent(
+                id="p", name="submit_patch",
+                input={"reasoning": "x", "files": [{"path": path, "content": content}]},
+            )],
+            stop_reason="tool_use",
+            usage=Usage(input_tokens=10, output_tokens=5), raw={},
+        )
+        client, _ = make_client([completion])
+        config = Config(anthropic=ProviderConfig(api_key="fake", base_url=None),
+                        openai=None, default_provider="anthropic")
+        with patch("qqcode.orchestrator.build_client",
+                   return_value=(client, client._ledger)):  # noqa: SLF001
+            return run_task(task=f"edit {path}", repo=repo, config=config, mode="fast",
+                            dry_run=False, seed=seed)  # type: ignore[arg-type]
+
+    def test_worktree_seed_preserves_the_previous_turn(self, tmp_path: Path) -> None:
+        repo = self._git_repo(tmp_path)
+        assert self._turn(repo, "app.py", 'def greet(): return "hi"\n', "worktree").success
+        assert self._turn(repo, "util.py", "def helper(): return 42\n", "worktree").success
+
+        # Turn 1's edit survived turn 2, which never touched app.py.
+        assert (repo / "app.py").read_text() == 'def greet(): return "hi"\n'
+        assert (repo / "util.py").read_text() == "def helper(): return 42\n"
+
+    def test_head_seed_refuses_the_second_turn(self, tmp_path: Path) -> None:
+        """The dirty guard catches what would otherwise be a silent revert."""
+        from qqcode.workspace.worktree import DirtyWorktreeError
+
+        repo = self._git_repo(tmp_path)
+        assert self._turn(repo, "app.py", 'def greet(): return "hi"\n', "head").success
+
+        with pytest.raises(DirtyWorktreeError):
+            self._turn(repo, "util.py", "def helper(): return 42\n", "head")
+
+        # Turn 1's work is intact precisely because the guard fired.
+        assert (repo / "app.py").read_text() == 'def greet(): return "hi"\n'

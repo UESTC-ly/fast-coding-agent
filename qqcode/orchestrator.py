@@ -18,11 +18,12 @@ from qqcode.memory.trace import TraceRecord, TraceStore
 from qqcode.models.billing import BilledClient
 from qqcode.models.factory import build_client, uniform_tiers
 from qqcode.models.protocol import CostLedger, ModelTier
+from qqcode.review import ConfirmCallback, build_review
 from qqcode.routing import RoutingDecision, execute_fastpath, route_task
 from qqcode.routing.fastpath import FastPathInput, build_escalation_context
 from qqcode.skills.index import SkillIndex
 from qqcode.tools.builtins import default_registry
-from qqcode.workspace.worktree import WorktreeWorkspace
+from qqcode.workspace.worktree import Seed, WorktreeWorkspace
 
 Mode = Literal["auto", "fast", "full"]
 
@@ -40,6 +41,9 @@ class RunResult:
     dry_run: bool = False
     error: str | None = None
     turns_used: int = 0
+    # True when the agent produced a valid change that the user declined.
+    # Distinct from failure: the work was sound, the person did not want it.
+    rejected: bool = False
 
 
 def run_task(
@@ -55,6 +59,8 @@ def run_task(
     reasoning_effort: str | None = None,
     max_turns: int = 30,
     trace_store: TraceStore | None = None,
+    confirm: ConfirmCallback | None = None,
+    seed: Seed = "head",
 ) -> RunResult:
     """Run a task against a repository.
 
@@ -72,6 +78,14 @@ def run_task(
             OpenAI path only; ignored for Anthropic.
         max_turns: Full Agent turn cap.
         trace_store: If provided, one TraceRecord is written per run.
+        confirm: Human verdict callback. `None` (the default) means the objective
+            conditions decide alone — identical to batch behavior. When supplied,
+            a change that passes every objective condition is still only
+            finalized if this returns True. Used by the conversational layer,
+            where no hidden acceptance test exists.
+        seed: Whether each shadow starts from the last commit ("head", default)
+            or the live working tree ("worktree"). Conversation needs
+            "worktree" so turn N builds on turn N-1's uncommitted output.
     """
     t0 = time.monotonic()
     tier_models = uniform_tiers(model) if model else None
@@ -98,7 +112,7 @@ def run_task(
         result = _run_fullagent(
             task, repo, client, ledger, skill_index, repo,
             harness=harness, dry_run=dry_run, max_turns=max_turns,
-            escalation_context="",
+            escalation_context="", confirm=confirm, seed=seed,
         )
         _finalise_trace(record, result, ledger, time.monotonic() - t0, trace_store)
         return result
@@ -107,10 +121,13 @@ def run_task(
         if record is not None:
             record.route_layer = "mode_forced"
             record.route_decision = "fastpath"
-        result, esc = _try_fastpath(task, repo, client, skill_index, (), harness, dry_run, record)
-        if result is not None:
-            _finalise_trace(record, result, ledger, time.monotonic() - t0, trace_store)
-            return result
+        fp_result, esc = _try_fastpath(
+            task, repo, client, skill_index, (), harness, dry_run, record,
+            confirm=confirm, seed=seed,
+        )
+        if fp_result is not None:
+            _finalise_trace(record, fp_result, ledger, time.monotonic() - t0, trace_store)
+            return fp_result
         blocked = RunResult(
             success=False, mode_used="fastpath", finish_reason="escalation_blocked",
             changed_files=frozenset(), reasoning="", ledger=ledger,
@@ -134,19 +151,20 @@ def run_task(
         record.files_hint_count = len(routing.files_hint)
 
     if routing.decision == RoutingDecision.FASTPATH:
-        result, esc = _try_fastpath(
-            task, repo, client, skill_index, routing.files_hint, harness, dry_run, record
+        fp_result, esc = _try_fastpath(
+            task, repo, client, skill_index, routing.files_hint, harness, dry_run, record,
+            confirm=confirm, seed=seed,
         )
-        if result is not None:
-            _finalise_trace(record, result, ledger, time.monotonic() - t0, trace_store)
-            return result
+        if fp_result is not None:
+            _finalise_trace(record, fp_result, ledger, time.monotonic() - t0, trace_store)
+            return fp_result
     else:
         esc = ""
 
     result = _run_fullagent(
         task, repo, client, ledger, skill_index, repo,
         harness=harness, dry_run=dry_run, max_turns=max_turns,
-        escalation_context=esc,
+        escalation_context=esc, confirm=confirm, seed=seed,
     )
     _finalise_trace(record, result, ledger, time.monotonic() - t0, trace_store)
     return result
@@ -155,6 +173,35 @@ def run_task(
 # --------------------------------------------------------------------------
 # Internal helpers
 # --------------------------------------------------------------------------
+
+
+def _accepted_by_user(
+    confirm: ConfirmCallback | None,
+    *,
+    task: str,
+    mode_used: str,
+    reasoning: str,
+    changed_files: frozenset[str],
+    source: Path,
+    shadow: Path,
+) -> bool:
+    """Whether the human verdict permits finalizing.
+
+    Returns True when no callback was supplied: batch runs have no one to ask,
+    and the objective conditions have already decided. This is what keeps
+    `confirm=None` byte-for-byte identical to the pre-conversation behavior.
+    """
+    if confirm is None:
+        return True
+    review = build_review(
+        task=task,
+        mode_used=mode_used,
+        reasoning=reasoning,
+        changed_files=changed_files,
+        source=source,
+        shadow=shadow,
+    )
+    return confirm(review)
 
 
 def _try_fastpath(
@@ -166,6 +213,9 @@ def _try_fastpath(
     harness: AcceptanceHarness | None,
     dry_run: bool,
     record: TraceRecord | None = None,
+    *,
+    confirm: ConfirmCallback | None = None,
+    seed: Seed = "head",
 ) -> tuple[RunResult | None, str]:
     """Attempt FastPath in a fresh shadow workspace.
 
@@ -175,7 +225,7 @@ def _try_fastpath(
     if record is not None:
         record.fastpath_attempted = True
 
-    with WorktreeWorkspace(repo, use_git=True) as workspace:
+    with WorktreeWorkspace(repo, use_git=True, seed=seed) as workspace:
         baseline = workspace.snapshot()
         inp = FastPathInput(
             task=task,
@@ -192,6 +242,21 @@ def _try_fastpath(
 
         if not fp.success:
             return None, build_escalation_context(fp, task)
+
+        if not _accepted_by_user(
+            confirm,
+            task=task,
+            mode_used="fastpath",
+            reasoning=fp.reasoning,
+            changed_files=fp.changed_files,
+            source=repo,
+            shadow=workspace.root,
+        ):
+            return RunResult(
+                success=False, mode_used="fastpath", finish_reason="rejected",
+                changed_files=fp.changed_files, reasoning=fp.reasoning,
+                ledger=ledger, dry_run=dry_run, rejected=True,
+            ), ""
 
         if not dry_run:
             workspace.finalize(repo)
@@ -240,8 +305,10 @@ def _run_fullagent(
     dry_run: bool,
     max_turns: int,
     escalation_context: str,
+    confirm: ConfirmCallback | None = None,
+    seed: Seed = "head",
 ) -> RunResult:
-    with WorktreeWorkspace(repo, use_git=True) as workspace:
+    with WorktreeWorkspace(repo, use_git=True, seed=seed) as workspace:
         baseline = workspace.snapshot()
         inp = FullAgentInput(
             task=task,
@@ -273,6 +340,21 @@ def _run_fullagent(
                     error=str(fail.diagnostic()) if fail else "acceptance failed",
                     turns_used=fa.turns_used,
                 )
+
+        if not _accepted_by_user(
+            confirm,
+            task=task,
+            mode_used="fullagent",
+            reasoning=fa.reasoning,
+            changed_files=changed,
+            source=repo,
+            shadow=workspace.root,
+        ):
+            return RunResult(
+                success=False, mode_used="fullagent", finish_reason="rejected",
+                changed_files=changed, reasoning=fa.reasoning, ledger=ledger,
+                dry_run=dry_run, turns_used=fa.turns_used, rejected=True,
+            )
 
         if not dry_run:
             workspace.finalize(target)

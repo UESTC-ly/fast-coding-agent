@@ -12,6 +12,7 @@ app's default, so the options attach directly to `qqcode`.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated
 
@@ -20,7 +21,7 @@ from rich.console import Console
 from rich.table import Table
 
 from qqcode.config import Config
-from qqcode.memory.replay import ReplayEngine
+from qqcode.memory.replay import CalibrationRow, ReplayEngine
 from qqcode.memory.trace import TraceStore
 from qqcode.orchestrator import RunResult, run_task
 
@@ -40,12 +41,13 @@ def run(
     provider: Annotated[str, typer.Option("--provider", help="anthropic|openai")] = "",
     model: Annotated[str, typer.Option("--model", help="Pin a specific model id")] = "",
     max_turns: Annotated[int, typer.Option("--max-turns", help="Full Agent turn limit")] = 30,
+    chat: Annotated[bool, typer.Option("--chat", "-c", help="Interactive conversation")] = False,
 ) -> None:
     """Run a coding task, or use 'qqcode trace' for calibration commands."""
     if ctx.invoked_subcommand is not None:
         return  # a trace/other subcommand was invoked; let it run
-    if not task:
-        console.print("[red]Error:[/red] --task is required")
+    if not task and not chat:
+        console.print("[red]Error:[/red] --task is required (or use --chat)")
         raise typer.Exit(1)
 
     if mode not in {"auto", "fast", "full"}:
@@ -61,6 +63,25 @@ def run(
     if config.anthropic is None and config.openai is None:
         console.print("[red]Error:[/red] No API key found. Set ANTHROPIC_API_KEY or OPENAI_API_KEY in .env")
         raise typer.Exit(1)
+
+    if chat:
+        from qqcode.repl import run_repl
+
+        store = TraceStore.for_repo(repo)
+        try:
+            run_repl(
+                repo,
+                config,
+                mode=mode,  # type: ignore[arg-type]
+                max_turns=max_turns,
+                console=console,
+                trace_store=store,
+                provider=provider or None,
+                model=model or None,
+            )
+        finally:
+            store.close()
+        raise typer.Exit(0)
 
     console.print(f"[bold]Task:[/bold] {task}")
     console.print(f"[dim]repo={repo}  mode={mode}  dry_run={dry_run}[/dim]")
@@ -152,21 +173,31 @@ def trace_replay(
 
     engine = ReplayEngine(traces)
 
+    def _key_length(r: CalibrationRow) -> str:
+        return str(r.thresholds.max_task_length)
+
+    def _key_files(r: CalibrationRow) -> str:
+        return str(r.thresholds.max_files)
+
+    def _key_tau(r: CalibrationRow) -> str:
+        return f"{r.thresholds.confidence:.2f}"
+
+    key_fn: Callable[[CalibrationRow], str]
     if sweep == "length":
         rows = engine.calibrate_task_length()
         title = "Calibration: max task length (L)"
         key_label = "max_length"
-        key_fn = lambda r: str(r.thresholds.max_task_length)  # noqa: E731
+        key_fn = _key_length
     elif sweep == "files":
         rows = engine.calibrate_max_files()
         title = "Calibration: max files hint (K)"
         key_label = "max_files"
-        key_fn = lambda r: str(r.thresholds.max_files)  # noqa: E731
+        key_fn = _key_files
     else:
         rows = engine.calibrate_tau()
         title = "Calibration: confidence threshold (τ)"
         key_label = "τ"
-        key_fn = lambda r: f"{r.thresholds.confidence:.2f}"  # noqa: E731
+        key_fn = _key_tau
 
     table = Table(title=title, show_header=True, header_style="bold")
     table.add_column(key_label, justify="right")
@@ -178,15 +209,15 @@ def trace_replay(
     table.add_column("Δ cost", justify="right")
 
     baseline_tau = f"{engine.baseline.confidence:.2f}"
-    baseline_L = str(engine.baseline.max_task_length)
-    baseline_K = str(engine.baseline.max_files)
+    baseline_length = str(engine.baseline.max_task_length)
+    baseline_files = str(engine.baseline.max_files)
 
     for row in rows:
         key_val = key_fn(row)
         is_baseline = (
             (sweep == "tau" and key_val == baseline_tau)
-            or (sweep == "length" and key_val == baseline_L)
-            or (sweep == "files" and key_val == baseline_K)
+            or (sweep == "length" and key_val == baseline_length)
+            or (sweep == "files" and key_val == baseline_files)
         )
         prefix = "* " if is_baseline else "  "
         prec = f"{row.fp_precision:.0%}" if row.fp_precision is not None else "n/a"
