@@ -1,6 +1,6 @@
 [project]
 name = "qqcode"
-version = "0.1.0"
+version = "1.0.0"
 description = "Coding Agent with intelligent routing: FastPath for simple tasks, Full Agent for complex work"
 requires-python = ">=3.11"
 dependencies = [
