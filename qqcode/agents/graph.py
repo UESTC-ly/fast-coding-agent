@@ -23,6 +23,7 @@ from typing import Annotated, Any, TypedDict
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
+from qqcode.events import AgentEvent, EventCallback, describe_tool_call, emit
 from qqcode.models.billing import BilledClient
 from qqcode.models.errors import BudgetExhaustedError
 from qqcode.models.protocol import (
@@ -70,12 +71,16 @@ def _make_call_model(
     tools: list[ToolSpec],
     model_tier: ModelTier,
     phase: Phase = "fullagent",
+    on_event: EventCallback | None = None,
 ) -> Any:
     def call_model(state: AgentState) -> dict[str, Any]:
         if state["finish_reason"]:
             return {}
         if state["turns_used"] >= state["max_turns"]:
+            emit(on_event, AgentEvent(kind="finish", detail="max_turns"))
             return {"finish_reason": "max_turns"}
+
+        emit(on_event, AgentEvent(kind="turn_start", turn=state["turns_used"] + 1))
 
         try:
             completion = client.invoke(
@@ -93,10 +98,33 @@ def _make_call_model(
         assistant_msg = Msg(role=Role.ASSISTANT, content=completion.content)
         tool_calls = [b for b in completion.content if isinstance(b, ToolUseContent)]
 
+        # Prose the model emitted alongside its tool calls. This is the closest
+        # thing the loop has to visible reasoning, so it is worth surfacing even
+        # though the loop itself does not act on it.
+        for block in completion.content:
+            if isinstance(block, TextContent) and block.text.strip():
+                emit(
+                    on_event,
+                    AgentEvent(
+                        kind="assistant_text",
+                        turn=state["turns_used"] + 1,
+                        detail=block.text.strip(),
+                    ),
+                )
+
         # Explicit finish via finish tool
         for call in tool_calls:
             if call.name == TOOL_FINISH:
                 summary = str(call.input.get("summary", ""))
+                emit(
+                    on_event,
+                    AgentEvent(
+                        kind="finish",
+                        turn=state["turns_used"] + 1,
+                        detail=summary,
+                        meta={"reason": "explicit"},
+                    ),
+                )
                 return {
                     "messages": [assistant_msg],
                     "turns_used": state["turns_used"] + 1,
@@ -125,7 +153,7 @@ def _make_call_model(
     return call_model
 
 
-def _make_run_tools(executor: ToolExecutor) -> Any:
+def _make_run_tools(executor: ToolExecutor, on_event: EventCallback | None = None) -> Any:
     def run_tools(state: AgentState) -> dict[str, Any]:
         last_msg = state["messages"][-1]
         tool_calls = [
@@ -137,10 +165,24 @@ def _make_run_tools(executor: ToolExecutor) -> Any:
         last_error_key = state["last_error_key"]
         error_streak = state["error_streak"]
         finish_reason = ""
+        turn = state["turns_used"]
 
         for call in tool_calls:
+            emit(on_event, AgentEvent(
+                kind="tool_start",
+                turn=turn,
+                tool=call.name,
+                detail=describe_tool_call(call.name, call.input),
+            ))
             result = executor.execute(call)
             results.append(result)
+            emit(on_event, AgentEvent(
+                kind="tool_end",
+                turn=turn,
+                tool=call.name,
+                detail=describe_tool_call(call.name, call.input),
+                is_error=result.is_error,
+            ))
 
             if result.is_error:
                 key = (result.content[:200]
@@ -206,10 +248,11 @@ def _compile_graph(
     tools: list[ToolSpec],
     model_tier: ModelTier,
     phase: Phase = "fullagent",
+    on_event: EventCallback | None = None,
 ) -> Any:
     graph: StateGraph[AgentState] = StateGraph(AgentState)
-    graph.add_node("call_model", _make_call_model(client, tools, model_tier, phase))
-    graph.add_node("run_tools", _make_run_tools(executor))
+    graph.add_node("call_model", _make_call_model(client, tools, model_tier, phase, on_event))
+    graph.add_node("run_tools", _make_run_tools(executor, on_event))
     graph.add_edge(START, "call_model")
     graph.add_conditional_edges(
         "call_model", _route_after_model,
@@ -227,9 +270,15 @@ def build_full_agent_graph(
     executor: ToolExecutor,
     tools: list[ToolSpec],
     model_tier: ModelTier,
+    on_event: EventCallback | None = None,
 ) -> Any:
-    """Compile the Full Agent ReAct graph. Returns a runnable LangGraph graph."""
-    return _compile_graph(client, executor, tools, model_tier)
+    """Compile the Full Agent ReAct graph. Returns a runnable LangGraph graph.
+
+    Args:
+        on_event: Progress callback. `None` runs the loop silently, which is what
+            batch mode wants; the conversation passes a renderer.
+    """
+    return _compile_graph(client, executor, tools, model_tier, on_event=on_event)
 
 
 # ---------------------------------------------------------------------------

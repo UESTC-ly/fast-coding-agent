@@ -15,6 +15,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from qqcode.agents.graph import AgentState, build_full_agent_graph, make_spawn_callback
+from qqcode.events import EventCallback
 from qqcode.models.billing import BilledClient
 from qqcode.models.protocol import (
     ModelTier,
@@ -41,6 +42,12 @@ class FullAgentInput:
     escalation_context: str = ""
     max_turns: int = 30
     model_tier: ModelTier = ModelTier.BALANCED
+    # Digest of earlier turns in the same conversation. Empty in batch mode,
+    # where each task is independent by definition.
+    history: str = ""
+    # Progress callback. None keeps the loop silent, which is what batch mode
+    # and every existing test expect.
+    on_event: EventCallback | None = None
 
 
 @dataclass
@@ -70,7 +77,7 @@ def execute_full_agent(
     executor = ToolExecutor(workspace, store, inp.skill_index, spawn_callback=spawn_cb)
 
     tools = registry.specs_for(tier="fullagent")
-    graph = build_full_agent_graph(client, executor, tools, inp.model_tier)
+    graph = build_full_agent_graph(client, executor, tools, inp.model_tier, inp.on_event)
 
     system = _build_system_prompt(inp)
     initial: AgentState = {
@@ -124,6 +131,10 @@ def _build_system_prompt(inp: FullAgentInput) -> str:
         "- Call `finish` as soon as the change is made and verified. Extra turns "
         "spent re-checking finished work are pure cost.",
     ]
+    if inp.history:
+        # Before the escalation context: the conversation is the frame the task
+        # sits in, whereas an escalation is a detail about this attempt.
+        parts += ["", inp.history]
     if inp.escalation_context:
         parts += ["", "## Previous FastPath Attempt", inp.escalation_context]
     return "\n".join(parts)
