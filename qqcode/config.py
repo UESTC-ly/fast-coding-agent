@@ -9,6 +9,13 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+# Global fallback, consulted when no .env exists in the current directory or
+# any parent. Without it `qqcode --chat` only works inside the directory tree
+# that happens to hold a .env, which is the wrong constraint for a tool meant
+# to be pointed at arbitrary repositories.
+GLOBAL_CONFIG_DIR = Path.home() / ".config" / "qqcode"
+GLOBAL_ENV_FILENAME = "env"
+
 
 @dataclass(frozen=True)
 class ProviderConfig:
@@ -79,12 +86,22 @@ class Config:
 
     @staticmethod
     def _find_dotenv() -> Path | None:
-        """Search for .env file in current and parent directories."""
+        """Locate the environment file.
+
+        A project-local `.env` wins over the global one: a repository that
+        pins its own provider or base URL should not be overridden by whatever
+        the user configured globally. The global file is the fallback that lets
+        `qqcode` run against a repository that has no .env of its own.
+        """
         cwd = Path.cwd()
         for parent in [cwd, *cwd.parents]:
             candidate = parent / ".env"
             if candidate.is_file():
                 return candidate
+
+        global_env = GLOBAL_CONFIG_DIR / GLOBAL_ENV_FILENAME
+        if global_env.is_file():
+            return global_env
         return None
 
     @staticmethod
