@@ -131,7 +131,7 @@ class TraceRecord:
         return cls(
             task_hash=hashlib.sha256(task[:500].encode()).hexdigest()[:16],
             task_snippet=task[:200],
-            timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            timestamp=datetime.datetime.now(datetime.UTC).isoformat(),
             task_length=len(task),
         )
 

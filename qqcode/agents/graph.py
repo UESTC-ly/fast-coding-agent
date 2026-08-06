@@ -30,17 +30,18 @@ from qqcode.models.protocol import (
     ContentBlock,
     ModelTier,
     Msg,
+    Phase,
     Role,
     TextContent,
+    ToolSpec,
     ToolUseContent,
 )
 from qqcode.skills.index import SkillIndex
 from qqcode.tools.artifacts import InMemoryArtifactStore
 from qqcode.tools.builtins import TOOL_FINISH
 from qqcode.tools.executor import SpawnCallback, ToolExecutor
-from qqcode.tools.registry import ToolRegistry, ToolSpec
+from qqcode.tools.registry import ToolRegistry
 from qqcode.workspace.protocol import Workspace
-
 
 # ---------------------------------------------------------------------------
 # Graph state
@@ -68,7 +69,7 @@ def _make_call_model(
     client: BilledClient,
     tools: list[ToolSpec],
     model_tier: ModelTier,
-    phase: str = "fullagent",
+    phase: Phase = "fullagent",
 ) -> Any:
     def call_model(state: AgentState) -> dict[str, Any]:
         if state["finish_reason"]:
@@ -204,9 +205,9 @@ def _compile_graph(
     executor: ToolExecutor,
     tools: list[ToolSpec],
     model_tier: ModelTier,
-    phase: str = "fullagent",
+    phase: Phase = "fullagent",
 ) -> Any:
-    graph: StateGraph = StateGraph(AgentState)
+    graph: StateGraph[AgentState] = StateGraph(AgentState)
     graph.add_node("call_model", _make_call_model(client, tools, model_tier, phase))
     graph.add_node("run_tools", _make_run_tools(executor))
     graph.add_edge(START, "call_model")

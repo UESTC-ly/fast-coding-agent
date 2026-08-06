@@ -16,7 +16,6 @@ from qqcode.memory.replay import (
 from qqcode.memory.trace import TraceRecord, TraceStore
 from qqcode.routing.router import RoutingThresholds
 
-
 # --- helpers ------------------------------------------------------------------
 
 def _fp_trace(

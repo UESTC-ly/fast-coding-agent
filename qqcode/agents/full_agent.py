@@ -156,30 +156,3 @@ def _build_result(
         messages=final.get("messages", []),
         error=error,
     )
-
-
-@dataclass(frozen=True)
-class FullAgentInput:
-    """Task and context for Full Agent execution."""
-
-    task: str
-    baseline: WorkspaceSnapshot
-    skill_index: SkillIndex
-    tool_registry: ToolRegistry | None = None  # None = use default_registry()
-    escalation_context: str = ""
-    max_turns: int = 30
-    model_tier: ModelTier = ModelTier.BALANCED
-
-
-@dataclass
-class FullAgentResult:
-    """What the Full Agent hands back after N turns."""
-
-    success: bool
-    final_snapshot: WorkspaceSnapshot
-    changed_files: frozenset[str]
-    reasoning: str
-    turns_used: int
-    finish_reason: str  # "explicit" | "max_turns" | "budget" | "stuck" | "error"
-    messages: list[Msg] = field(default_factory=list)
-    error: str | None = None

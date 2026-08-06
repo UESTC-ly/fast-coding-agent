@@ -9,7 +9,6 @@ import pytest
 from qqcode.tools.mcp import MCPCapability, MCPServerConfig
 from qqcode.tools.mcp_client import MCPClient
 
-
 # --- Fixtures ------------------------------------------------------------------
 
 

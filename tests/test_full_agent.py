@@ -6,8 +6,6 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 from qqcode.agents.full_agent import FullAgentInput, execute_full_agent
 from qqcode.models.billing import BilledClient, RetryPolicy
 from qqcode.models.errors import BudgetExhaustedError, ProviderError
@@ -26,7 +24,6 @@ from qqcode.tools.artifacts import InMemoryArtifactStore
 from qqcode.tools.builtins import default_registry
 from qqcode.tools.executor import ToolExecutor
 from qqcode.workspace.worktree import WorktreeWorkspace
-
 
 # ---------------------------------------------------------------------------
 # Helpers

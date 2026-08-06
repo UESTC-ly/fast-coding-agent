@@ -32,7 +32,6 @@ from qqcode.skills.skill import RoutingHint, Skill
 from qqcode.tools.builtins import default_registry
 from qqcode.workspace.worktree import WorktreeWorkspace
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
