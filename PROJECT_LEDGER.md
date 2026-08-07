@@ -1,7 +1,7 @@
 # QQCode 项目台账
 
 > **维护约定**：每个里程碑完成、范围变更或关键决策后立即更新本文件。
-> 最后更新：2026-08-04 · M1–M6 主链路完成（33 模块 · 350 tests · ruff/mypy clean）
+> 最后更新：2026-08-06 · v1.0.0 已发布（53 模块 · 601 tests · ruff/mypy clean）
 
 ---
 
@@ -18,6 +18,20 @@
 | 安全性 | 零非预期修改逃逸 | snapshot 全量 diff 比对 |
 
 **成本口径**：FastPath 前置请求、失败请求、Provider 重试、子代理消耗、升级后的 Full Agent 消耗，全部计入 `automatic_total`。不允许任何绕过计费入口的出网路径。
+
+### 1.1 指标达成实情（2026-08-06 核对）
+
+三条指标里**只有一条有真实数据**，且样本不足以外推。如实记录，不四舍五入成「达标」。
+
+| 指标 | 目标 | 实测 | 判定 |
+|------|------|------|------|
+| 成本节省 | ≤ 50% | **13.8%**（automatic 868 vs full 6,297 tokens/任务） | 方向已验证，**样本仅 3 个同类任务**，量级不可外推 |
+| 成功率 | ≥ 95% | — | **未测量**：需两模式跑同一任务集配对 |
+| 安全性 | 零逃逸 | — | 机制齐备且有 31 条单元不变量锁定，但**无端到端全量 diff 验证** |
+
+成本那条来自 v1.0.0 的 FastPath 预取修复 A/B（真实 API，openai/gpt-5.6-terra，3 个单文件任务，arm A 用 monkeypatch 还原修复前行为）。口径符合上述定义：arm A 的 FastPath 失败消耗计入 `automatic_total`。
+
+**为什么另两条测不了**：`behavioral_rate` 的分母是 15 个 fixture，但 2026-08-06 的离线审计确认其中只有 5 个的隐藏断言能从任务陈述推导（见 §7 R9）。在不可推导的 fixture 上，一个正确修复也会得 0 分，所以历史那个「0/15 行为率」不是能力数据。测量工具已于同日修好，但**尚未跑过一次**——当前位置是「仪器已校准，未读数」。
 
 ---
 
@@ -105,6 +119,8 @@ qqcode --task "修复 auth 模块的 token 过期判断" --repo ./myproject
 | **M4.5 MCP 客户端** | stdio / SSE 连接、懒启动、崩溃隔离、写类服务器约束到 shadow 根 | **完成** | stdio transport 完成；SSE 预留接口；15 条测试全绿 |
 | **M5 Memory + 轨迹库** | checkpointer、`.qqcode/memory`、路由轨迹记录、离线重放校准 τ/L/K；量化 skill 对 FastPath 命中率的提升 | **完成** | 30 条测试；`qqcode trace replay` 输出 τ/L/K 三维校准表 + skill 影响列表 |
 | **M6 CLI + 评测** | `orchestrator.run_task`（三模式 + 升级路径 + finalize 门控）、typer CLI、rich 输出、真实 API 端到端验证 | **完成** | Anthropic auto/fast/full 三模式端到端通过；finalize 原子写回验证；无 staging/backup 残留 |
+| **M7 会话交互层**（原规划外新增） | `qqcode --chat` REPL、`.qqcode/sessions.db` 会话持久化 + `--resume`/`--continue`、快照式 `/undo`、实时工具调用输出、shadow 从工作树 seed、脏仓库守卫 | **完成** | 见 `docs/DESIGN_CONVERSATIONAL_LAYER.md`；601 tests |
+| **v1.0.0 发布** | 版本号 0.1.0 → 1.0.0，tag + GitHub Release；CLI 表面 / `run_task` 签名 / trace schema 纳入兼容性承诺 | **完成** | `github.com/UESTC-ly/fast-coding-agent/releases/tag/v1.0.0`；已知边界在 release notes 中明示 |
 
 ---
 
@@ -336,10 +352,12 @@ qqcode --task "..."  --repo ./myproject  [--mode auto|fast|full]  [--dry-run]
 | git worktree 在非 git 仓库回退到全量拷贝 | 大仓库启动慢 | 已实现回退；大仓库场景待 M5 实测 |
 | ~~**R6：M2 适配层与 `BilledClient` 零测试覆盖**~~ | ~~计费保真度、重试记账、结构化输出互斥均未被测试锁定~~ | ✅ **R6 已关闭**：`tests/test_adapters.py`（43 条）+ `tests/test_billing.py`（24 条）补全，duck-typed fake SDK |
 | ~~**R7：FastPath 的 `run_command(["sh", "-c", ...])` 会被 `CommandGuard` 拒绝**~~ | ~~隐藏验收测试路径当前不可用~~ | ✅ **R7 已关闭**：`AcceptanceHarness` 绕过 `CommandGuard`（设计意图：验收命令来自任务作者，信任级别等同于运行 QQCode 的人），注入→执行→清理，agent 全程不可见 |
-| **R8：`--mode fast` 无 `files_hint`，修改已存在文件仍会盲写** | fast 模式下编辑任务将产生无效补丁（模型会正确拒绝） | 待定：① 在 fast 模式里跑 L0/L1 拿 hint；② 从任务文本中提取路径；③ 接受限制并在文档中说明 fast 模式适合新建文件场景 |
+| ~~**R8：`--mode fast` 无 `files_hint`，修改已存在文件仍会盲写**~~ | ~~fast 模式下编辑任务将产生无效补丁~~ | ✅ **R8 已关闭**（2026-08-06，v1.0.0）：采用待定方案②的变体——`resolve_prefetch_paths` 从任务文本提取文件名并**对真实工作区校验**。范围比 R8 原描述更广：`--mode fast`、L0 skill hint、fallback 三条路径都是无 hint 入口，修复放在 `fastpath.py` 故一并覆盖。实测省 86.2% tokens |
+| **R9：15 个 benchmark fixture 里仅 5 个可测量能力** | `behavioral_rate` 混入了「正确修复也会失败」的 fixture，历史 0/15 不是能力数据 | 部分缓解（2026-08-06）：离线审计全部 15 个，判定写入 `benchmarks/tasks/derivability.json`（**不改共享 pin**）；报告改为以 `behavioral_rate_measurable` 领先并列出每个排除项。剩余：3 个 `unverified` 需联网审完；3 个整文件粒度需改 `acceptance_command`（属跨项目决策） |
+| **R10：`AcceptanceHarness` 绕过 `CommandGuard` 的安全声明仍未对用户说明** | 用户从不可信来源接受验收套件 = 任意代码执行。README 只说明 `CommandGuard` 存在，未说验收通道绕过它 | **未缓解**。M6 曾要求「显著标注」，至今未做。修法：CLI 接受 `--harness` 时打印信任级别警告 + README 安全章节 |
 | 子代理可能被滥用导致成本爆炸 | 单任务成本失控 | `max_turns` 硬上限 + 父级 spawn 数量预算（M4.5 或 M5 补充） |
 | 多数写类 MCP 服务器可能不支持根路径参数 | 可用的写类 server 很少 | 接受这个代价——保住三条件收敛优先于多支持一个 server |
-| skill 的实际收益未量化 | 可能是纯成本 | M5 用轨迹库对比「有/无 skill」的 FastPath 命中率与总成本 |
+| skill 的实际收益未量化 | 可能是纯成本 | **仍未量化**（2026-08-06 核对）：`ReplayEngine.skill_impact()` 已实现，但 `.qqcode/trace.db` 为空（0 行），且该库 gitignored、历史 trace 已随临时仓库丢失。需先跑一批真实任务积累 trace |
 | AcceptanceHarness 的安全声明未在 CLI / README 中对用户说明 | 用户可能从不可信来源接受验收套件 | 需在 M6 文档中显著标注 |
 
 ---
@@ -366,3 +384,11 @@ qqcode --task "..."  --repo ./myproject  [--mode auto|fast|full]  [--dry-run]
 | 2026-08-04 | **R8 新增**：`--mode fast` 无 `files_hint`，修改已存在文件仍会盲写；fast 模式当前适合新建文件任务，待定修法 |
 | 2026-08-04 | `filter_acceptance_paths` 类型签名修正：接受 `frozenset[str] \| set[str]`，返回 `frozenset[str]`，消除 orchestrator.py 中的 mypy 类型错误 |
 | 2026-08-04 | 台账同步：M2–M6 交付物、关键修正、R6/R7 关闭记录全部落档 |
+| 2026-08-05 | FastPath 路由实验落档 `docs/EXPERIMENT_FASTPATH_ROUTING.md` |
+| 2026-08-05 | **三个 OpenAI 专属缺陷修复**：① 工具结果标 `Role.USER` 被 OpenAI 适配器静默丢弃；② `OutputSpec` schema 缺 `additionalProperties: false`，OpenAI `strict` 模式 400；③ FastPath 要求 `stop_reason == "tool_use"`（Anthropic 约定），拒掉所有合法 OpenAI 补丁。三者共同根因：共享代码按 Anthropic wire 约定编写 |
+| 2026-08-06 | M7 会话交互层完成：REPL、sessions、`/undo`、实时工具输出；shadow 改为从工作树 seed（修好一个既有的未提交改动丢失缺陷） |
+| 2026-08-06 | `DEFAULT_MODEL` / `~/.config/qqcode/env`：一份全局配置即可指向非厂商端点 |
+| 2026-08-06 | **R8 关闭 + v1.0.0 发布**：`resolve_prefetch_paths` 从任务文本提取文件名并对工作区校验，覆盖 `--mode fast` / L0 skill hint / fallback 三条无 hint 路径。真实 API A/B：automatic 从 3/3 declined→升级 变为 3/3 FastPath 命中，**−16,288 tokens（−86.2%）**。关键设计：解析结果**不回写** `files_hint`——该字段兼任条件 3 的强制契约，填入猜测会把「declined」换成「错误拒绝」 |
+| 2026-08-06 | **R9 新增并部分缓解**：离线审计 15 个 fixture 的隐藏断言可推导性（5 可推导 / 4 不可推导 / 3 整文件粒度 / 3 未审）。判定存入 `benchmarks/tasks/derivability.json`；报告改以 `behavioral_rate_measurable` 领先。**同时修评测器**：`_run_acceptance` 原先把「隐藏 test_patch 打不上」折叠成 `passed=False`，即把仪器故障记成能力不足，现归为 `incident_type="test_conflict"` |
+| 2026-08-06 | **发现 `benchmarks/tasks/real_tasks_v2.json` 是指向 `claude-engineer` 项目的符号链接**（git 模式 `120000`）。写它会静默修改另一个项目，且本仓库 `git diff` 完全干净——常规的「提交前看 diff」无法发现。故 fixture 审计结论另存独立文件，共享 pin 一字未改 |
+| 2026-08-06 | **R10 新增**：`AcceptanceHarness` 绕过 `CommandGuard` 的信任级别至今未对用户说明（M6 曾要求「显著标注」）。属真实安全缺口，待修 |
