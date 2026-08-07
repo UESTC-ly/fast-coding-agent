@@ -1099,6 +1099,10 @@ def main() -> int:
                         help="Run only this task id")
     parser.add_argument("--category", choices=["simple", "medium", "full_only"],
                         help="Run only tasks in this category")
+    parser.add_argument("--only-measurable", action="store_true",
+                        help="Run only fixtures whose hidden assertion is derivable from the "
+                             "statement (see tasks/derivability.json). The other verdicts fail "
+                             "for reasons the agent cannot control.")
     parser.add_argument("--model", default="",
                         help="Pin every tier to this model id (e.g. gpt-5.6-luna)")
     parser.add_argument("--provider", default="", choices=["", "openai", "anthropic"],
@@ -1123,6 +1127,19 @@ def main() -> int:
             return 1
     if args.category:
         tasks = [t for t in tasks if t.get("category") == args.category]
+    if args.only_measurable:
+        # `load_derivability` degrades to `{}` when the audit file is missing, which
+        # is right for reporting (no exclusions) but wrong here: silently running all
+        # 15 fixtures under a flag that asked for 5 would report unmeasurable
+        # fixtures as capability data. Refuse instead.
+        audit = load_derivability()
+        if not audit:
+            print(f"--only-measurable requires the audit file: {DERIVABILITY_PATH}")
+            return 1
+        tasks = [t for t in tasks if audit.get(t["id"]) == MEASURABLE_VERDICT]
+        if not tasks:
+            print(f"No fixture has verdict {MEASURABLE_VERDICT!r} in {DERIVABILITY_PATH}")
+            return 1
 
     print(f"Tasks: {len(tasks)}")
     for t in tasks:
