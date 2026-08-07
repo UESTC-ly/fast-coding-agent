@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "audited_at": "2026-08-06",
+  "method": "Offline audit. For each task, the hidden assertion was read from the upstream commit that introduced the test (local bare-repo cache, zero network) and compared against the source_statement the agent is shown. Verdicts are about DERIVABILITY, not difficulty: can a competent engineer, given only the statement, produce a fix the hidden test accepts?",
+  "verdicts_meaning": {
+    "derivable": "The assertion follows from the statement. Counts toward behavioral_rate.",
+    "not_derivable": "The assertion demands a literal, magic number, or direction the statement never supplies, so a legitimate fix can score 0. Excluded from behavioral_rate.",
+    "whole_file_granularity": "acceptance_command runs an entire test file, so any unrelated failure in that file scores the task 0 regardless of the fix. Excluded from behavioral_rate.",
+    "unverified": "The assertion could not be read offline because the bare-repo cache is shallow. NOT a judgement — an admission that this one has not been audited. Excluded from behavioral_rate until checked with network access."
+  },
+  "note": "This file is deliberately separate from real_tasks_v2.json, which is a symlink to the claude-engineer project's shared fixture definition. Writing verdicts there would silently modify another project and change what every run in both projects measures.",
+  "verdicts": {
+    "pytest-saferepr-broken-repr": {
+      "verdict": "derivable",
+      "note": "Asserts the repr starts with '<[RuntimeError() raised in repr()] SomeClass object at 0x'. The statement names the failure mode (INTERNALERROR when __repr__ raises) and that format follows from it. Observed passing 3/4 runs, consistent with this verdict."
+    },
+    "click-borrowed-pager-stdout": {
+      "verdict": "derivable",
+      "note": "Asserts no exception and output == 'Hello, Click!\\n' after PAGER points at a missing binary — exactly the statement's 'cleanup closes a borrowed stdout stream' symptom, with no extra literal required."
+    },
+    "pytest-dynamic-xfail-runtest": {
+      "verdict": "derivable",
+      "note": "Test targets a dynamically added strict xfail during runtest, which is what the statement describes."
+    },
+    "pytest-skipif-string-condition-caching": {
+      "verdict": "derivable",
+      "note": "Asserts a second module's skipif('skip') re-evaluates rather than reusing the first module's cached result — the stale-caching behaviour the statement names."
+    },
+    "pytest-importlib-double-import-fix": {
+      "verdict": "derivable",
+      "note": "Regression test for #10811: asserts import_path with ImportMode.importlib returns the module when already in sys.modules, matching the statement's 'imports a module twice'."
+    },
+    "pytest-excinfo-str-repr": {
+      "verdict": "not_derivable",
+      "note": "Asserts str(excinfo) == '<ExceptionInfo ValueError tblen=4>'. The statement says str() should behave like a normal exception catch, which implies the exception message — the opposite of the repr form. 'tblen=4' is a magic number nothing in the statement supplies."
+    },
+    "pytest-decorator-source-output": {
+      "verdict": "not_derivable",
+      "note": "Statement says an 'extra decorator line' is printed, implying removal; the upstream fix ADDS decorator lines and the test asserts '@foo' is present. A fix that follows the statement scores 0."
+    },
+    "pytest-safe-tmp-user-name": {
+      "verdict": "not_derivable",
+      "note": "Asserts the literal 'pytest-of-unknown' (upstream caught OSError and fell back). The statement only says to fix invalid characters in the user name, so any legitimate sanitisation scores 0."
+    },
+    "pytest-xfail-skip-mark-location": {
+      "verdict": "not_derivable",
+      "note": "Asserts fnmatch_lines against specific file:line reporting output. The statement says --runxfail breaks skip location reporting but never states the required output shape."
+    },
+    "pytest-junitxml-hostname-timestamp": {
+      "verdict": "whole_file_granularity",
+      "note": "acceptance_command runs all of testing/test_junitxml.py. Assertions also depend on platform.node() and datetime, so the outcome is environment-sensitive on top of the granularity problem."
+    },
+    "pytest-fixture-scope-display": {
+      "verdict": "whole_file_granularity",
+      "note": "acceptance_command runs all of testing/python/fixtures.py; any unrelated failure in that file scores the task 0."
+    },
+    "pytest-module-skip-message": {
+      "verdict": "whole_file_granularity",
+      "note": "acceptance_command runs all of testing/test_skipping.py; any unrelated failure in that file scores the task 0."
+    },
+    "flask-config-file-mode": {
+      "verdict": "unverified",
+      "note": "Assertion not readable offline: the flask bare-repo cache holds 1 commit and the test arrives via the SWE-bench test_patch. Needs network to audit."
+    },
+    "click-path-byteswarning": {
+      "verdict": "unverified",
+      "note": "Assertion not readable offline: the click bare-repo cache holds 2 commits. Needs network to audit."
+    },
+    "pytest-assertion-rewrite-number-docstring": {
+      "verdict": "unverified",
+      "note": "Assertion not readable offline: the commit introducing the test is absent from the 12-commit pytest bare-repo cache. Needs network to audit."
+    }
+  }
+}

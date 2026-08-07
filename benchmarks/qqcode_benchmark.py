@@ -43,6 +43,38 @@ from qqcode.memory.trace import TraceStore  # noqa: E402
 from qqcode.orchestrator import run_task  # noqa: E402
 
 TASKS_PATH = Path(__file__).parent / "tasks" / "real_tasks_v2.json"
+
+# Derivability audit. Kept in its own file because TASKS_PATH is a symlink to
+# another project's shared fixture definition — annotating it there would
+# silently change what every run in both projects measures.
+DERIVABILITY_PATH = Path(__file__).parent / "tasks" / "derivability.json"
+
+# Only "derivable" fixtures can measure capability. The rest fail for reasons
+# the agent cannot control, so averaging over them reports fixture-authoring
+# artifacts as agent incapacity.
+DERIVABILITY_VERDICTS = frozenset(
+    {"derivable", "not_derivable", "whole_file_granularity", "unverified"}
+)
+MEASURABLE_VERDICT = "derivable"
+
+
+def load_tasks(path: Path | None = None) -> list[dict[str, Any]]:
+    """Task definitions from the (symlinked) shared fixture manifest."""
+    return list(json.loads((path or TASKS_PATH).read_text())["tasks"])
+
+
+def load_derivability(path: Path | None = None) -> dict[str, str]:
+    """`{task_id: verdict}` from the audit file; empty when it is absent.
+
+    An empty result means no exclusions are applied, so a missing audit file
+    degrades to the previous all-fixtures behaviour rather than to zero
+    measurable tasks — a silent zero would look like catastrophic incapacity.
+    """
+    target = path or DERIVABILITY_PATH
+    if not target.exists():
+        return {}
+    raw = json.loads(target.read_text())
+    return {task_id: entry["verdict"] for task_id, entry in raw["verdicts"].items()}
 RESULTS_ROOT = Path(__file__).parent / "results"
 
 # Shared caches live OUTSIDE any single run directory so repeated invocations
@@ -100,10 +132,27 @@ class RunRecord:
     # Incident type: set when failure is NOT due to agent capability.
     # Runs with an incident are excluded from behavioral_rate and paired comparisons.
     # None=clean | "network"=HF/git/pip unreachable | "environment"=missing dep/venv
+    # | "test_conflict"=agent edited a file the hidden test patch also touches,
+    #   so the behavioral question was never asked
     incident_type: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class AcceptanceOutcome:
+    """What the hidden acceptance run established, if anything.
+
+    `conflict` is the case a plain bool could not express: the hidden test
+    patch did not apply, so no behavioral claim was tested. Keeping it separate
+    is what lets the run be excluded from the rate rather than counted as a
+    failure the agent caused.
+    """
+
+    passed: bool
+    output: str
+    conflict: bool = False
 
 
 @dataclass(frozen=True)
@@ -295,13 +344,42 @@ class RepoCache:
             shutil.rmtree(dest, ignore_errors=True)
 
 
-def _apply_patch(workspace: Path, patch_text: str) -> None:
+INCIDENT_TEST_CONFLICT = "test_conflict"
+
+
+def _apply_acceptance_result(record: RunRecord, outcome: AcceptanceOutcome) -> None:
+    """Record an acceptance outcome, attributing a patch conflict as an incident.
+
+    Kept separate from `_run_acceptance` so both call sites attribute
+    identically: detecting the conflict is useless if a caller still files it as
+    a clean behavioral failure, because the rate is computed from
+    `incident_type`, not from the outcome.
+    """
+    record.behavioral_complete = outcome.passed
+    # _clip keeps head AND tail: pytest's verdict line is at the end, so
+    # head-only truncation hides the very reason a run was scored a failure.
+    record.acceptance_output = _clip(outcome.output, 1200)
+    if outcome.conflict and record.incident_type is None:
+        record.incident_type = INCIDENT_TEST_CONFLICT
+
+
+class TestPatchConflictError(RuntimeError):
+    """The hidden test patch would not apply to the agent's workspace.
+
+    Distinct from a patch failure on the *source* side: it means the agent
+    edited a file the hidden test patch also touches, so the measurement never
+    ran. That is an apparatus fault, not a verdict on the agent's fix.
+    """
+
+
+def _apply_patch(workspace: Path, patch_text: str, *, is_test_patch: bool = False) -> None:
     r = subprocess.run(
         ["git", "apply", "--whitespace=nowarn", "-"],
         input=patch_text, cwd=workspace, capture_output=True, text=True,
     )
     if r.returncode != 0:
-        raise RuntimeError(f"patch failed: {r.stderr[:400]}")
+        detail = f"patch failed: {r.stderr[:400]}"
+        raise TestPatchConflictError(detail) if is_test_patch else RuntimeError(detail)
 
 
 # ---------------------------------------------------------------------------
@@ -545,14 +623,20 @@ def _run_acceptance(
     workspace: Path,
     test_patch: str,
     venv_python: Path,
-) -> tuple[bool, str]:
-    """Copy workspace, apply hidden test patch, run acceptance command."""
+) -> AcceptanceOutcome:
+    """Copy workspace, apply hidden test patch, run acceptance command.
+
+    Returns an outcome that distinguishes "tests ran and failed" from "the
+    hidden test patch could not be applied". Collapsing the two into one bool
+    attributed apparatus faults to the agent: a run whose fix was correct but
+    which also touched a test file scored exactly like a wrong fix.
+    """
     eval_dir = workspace.parent / f"{workspace.name}-eval"
     if eval_dir.exists():
         shutil.rmtree(eval_dir)
     shutil.copytree(workspace, eval_dir, symlinks=True)
     try:
-        _apply_patch(eval_dir, test_patch)
+        _apply_patch(eval_dir, test_patch, is_test_patch=True)
 
         env = _workspace_env(task, eval_dir)
         _run_prepare_commands(task, eval_dir, venv_python, env)
@@ -571,9 +655,16 @@ def _run_acceptance(
         except subprocess.TimeoutExpired:
             code, out = -1, f"[timed out after {_ACCEPT_TIMEOUT}s]"
 
-        return code == 0, out
+        return AcceptanceOutcome(passed=code == 0, output=out)
+    except TestPatchConflictError as exc:
+        # The agent edited a file the hidden test patch also touches, so the
+        # behavioral question was never asked. Report it instead of answering
+        # "no" on the measurement's behalf.
+        return AcceptanceOutcome(
+            passed=False, output=f"[test patch conflict: {exc}]", conflict=True
+        )
     except Exception as exc:
-        return False, f"[acceptance setup error: {exc}]"
+        return AcceptanceOutcome(passed=False, output=f"[acceptance setup error: {exc}]")
     finally:
         shutil.rmtree(eval_dir, ignore_errors=True)
 
@@ -675,13 +766,21 @@ def _run_one(
         # Distinguish agent-irrelevant failures: environment crashes are incidents,
         # not fixture failures.
         try:
-            passed, out = _run_acceptance(task, workspace, fixture.test_patch, venv_python)
+            outcome = _run_acceptance(task, workspace, fixture.test_patch, venv_python)
         except Exception as exc:
             base.error = f"acceptance setup: {exc}"
             base.incident_type = "environment"
             return base
 
+        passed, out = outcome.passed, outcome.output
         base.acceptance_output = _clip(out, 1200)
+        if outcome.conflict:
+            # This workspace is pristine — no agent touched it — so a patch that
+            # will not apply means the fixture's own test_patch is stale against
+            # its pinned base_commit. Apparatus, not a derivability verdict.
+            base.error = f"test_patch does not apply to base_commit: {out[:200]}"
+            base.incident_type = "environment"
+            return base
         if passed:
             base.behavioral_complete = False   # test passes pre-fix → fixture wrong
             return base
@@ -771,11 +870,8 @@ def _run_one(
 
     # --- evaluate: apply hidden test + run acceptance ---
     try:
-        passed, out = _run_acceptance(task, workspace, fixture.test_patch, venv_python)
-        base.behavioral_complete = passed
-        # _clip keeps head AND tail: pytest's verdict line is at the end, so
-        # head-only truncation hides the very reason a run was scored a failure.
-        base.acceptance_output = _clip(out, 1200)
+        outcome = _run_acceptance(task, workspace, fixture.test_patch, venv_python)
+        _apply_acceptance_result(base, outcome)
     except Exception as exc:
         base.acceptance_output = f"[eval error: {exc}]"
 
@@ -846,8 +942,40 @@ def _build_report(
         if r.incident_type:
             incidents_by_type[r.incident_type] = incidents_by_type.get(r.incident_type, 0) + 1
 
+    # Derivability: a fixture whose hidden assertion the statement never implies
+    # cannot measure capability. Averaging over those reports fixture-authoring
+    # artifacts as agent incapacity, so they get their own, honest denominator.
+    audit = load_derivability()
+    excluded = {
+        r.task_id: audit[r.task_id]
+        for r in records
+        if r.task_id in audit and audit[r.task_id] != MEASURABLE_VERDICT
+    }
+    measurable = [
+        r for r in clean_auto
+        if audit.get(r.task_id, MEASURABLE_VERDICT) == MEASURABLE_VERDICT
+    ]
+    measurable_full = [
+        r for r in clean_full
+        if audit.get(r.task_id, MEASURABLE_VERDICT) == MEASURABLE_VERDICT
+    ]
+
     return {
         "config": config_meta,
+        "derivability": {
+            "measurable_tasks": len({r.task_id for r in measurable}),
+            "excluded": excluded,
+            "excluded_count": len(excluded),
+            "behavioral_rate_measurable": _rate(measurable, "behavioral_complete"),
+            "behavioral_rate_measurable_full": _rate(measurable_full, "behavioral_complete"),
+            "note": (
+                "behavioral_rate_measurable covers only fixtures whose hidden "
+                "assertion is derivable from the statement the agent was shown. "
+                "The all_runs rates below include every fixture and therefore "
+                "understate capability; see tasks/derivability.json for the "
+                "per-fixture verdict and reasoning."
+            ),
+        },
         "incidents": {
             "total": sum(incidents_by_type.values()),
             "by_type": incidents_by_type,
@@ -893,9 +1021,40 @@ def _markdown(report: dict[str, Any]) -> str:
     f = report["all_runs"]["full"]
     fp = report["fastpath"]
     p  = report["paired"]
+    d = report.get("derivability", {})
     lines = [
         "# QQCode Benchmark Report", "",
-        "## All Runs", "",
+    ]
+    if d:
+        # Lead with the measurable rate: the all-fixtures rate below mixes in
+        # fixtures a correct fix cannot pass, so reporting it first would
+        # present a fixture-authoring artifact as a capability result.
+        lines += [
+            "## Measurable Capability", "",
+            f"Fixtures whose hidden assertion is derivable from the statement: "
+            f"**{d['measurable_tasks']}** "
+            f"(excluded: {d['excluded_count']})",
+            "",
+            "| Metric | Automatic | /full |",
+            "| --- | ---: | ---: |",
+            f"| Behavioral rate (measurable only) | "
+            f"{d['behavioral_rate_measurable']:.3f} | "
+            f"{d['behavioral_rate_measurable_full']:.3f} |",
+            "",
+        ]
+        if d["excluded"]:
+            lines += ["Excluded fixtures and why:", ""]
+            lines += [
+                f"- `{task_id}` — {verdict}"
+                for task_id, verdict in sorted(d["excluded"].items())
+            ]
+            lines += [
+                "",
+                "See `benchmarks/tasks/derivability.json` for the per-fixture reasoning.",
+                "",
+            ]
+    lines += [
+        "## All Runs (every fixture, understates capability)", "",
         "| Metric | Automatic | /full |",
         "| --- | ---: | ---: |",
         f"| Attempted | {a['attempted']} | {f['attempted']} |",
