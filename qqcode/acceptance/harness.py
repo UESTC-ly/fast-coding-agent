@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -39,6 +40,34 @@ ACCEPTANCE_DIR = ".qqcode_acceptance"
 # Artifacts test runners leave behind. Removed alongside the injected files so
 # they never reach the diff check.
 RUNNER_ARTIFACTS = ("__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache")
+
+# Shown once per process, the first time a non-empty suite actually executes.
+# Stating the trust level in a docstring is not telling the user: the person at
+# risk is whoever runs a suite they did not write, and they never read this file.
+TRUST_WARNING = (
+    "[qqcode] Running an acceptance suite. Acceptance commands bypass "
+    "CommandGuard by design — they come from the task author, whose trust level "
+    "equals yours. Whoever supplied this suite can execute arbitrary code on "
+    "this machine. Never run a suite from an untrusted source."
+)
+
+# Process-global on purpose: one warning per run, not one per task in a batch.
+_warned = False
+
+
+def reset_trust_warning() -> None:
+    """Re-arm the once-per-process warning. For tests."""
+    global _warned
+    _warned = False
+
+
+def _warn_trust_level() -> None:
+    """Emit the trust-level warning to stderr, at most once per process."""
+    global _warned
+    if _warned:
+        return
+    _warned = True
+    print(TRUST_WARNING, file=sys.stderr)
 
 
 @dataclass(frozen=True)
@@ -147,9 +176,14 @@ class AcceptanceHarness:
         Stops at the first failure: later suites add no information once the
         gate is already closed, and each one costs wall-clock time.
 
+        Warns on stderr the first time a suite runs in this process: these
+        commands run outside `CommandGuard` (see the module docstring).
+
         Returns:
             Results in execution order. Empty when no tests are configured.
         """
+        if self._tests:
+            _warn_trust_level()
         results: list[AcceptanceResult] = []
         for test in self._tests:
             result = self._run_one(test, root)

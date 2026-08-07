@@ -356,11 +356,11 @@ qqcode --task "..."  --repo ./myproject  [--mode auto|fast|full]  [--dry-run]
 | ~~**R7：FastPath 的 `run_command(["sh", "-c", ...])` 会被 `CommandGuard` 拒绝**~~ | ~~隐藏验收测试路径当前不可用~~ | ✅ **R7 已关闭**：`AcceptanceHarness` 绕过 `CommandGuard`（设计意图：验收命令来自任务作者，信任级别等同于运行 QQCode 的人），注入→执行→清理，agent 全程不可见 |
 | ~~**R8：`--mode fast` 无 `files_hint`，修改已存在文件仍会盲写**~~ | ~~fast 模式下编辑任务将产生无效补丁~~ | ✅ **R8 已关闭**（2026-08-06，v1.0.0）：采用待定方案②的变体——`resolve_prefetch_paths` 从任务文本提取文件名并**对真实工作区校验**。范围比 R8 原描述更广：`--mode fast`、L0 skill hint、fallback 三条路径都是无 hint 入口，修复放在 `fastpath.py` 故一并覆盖。实测省 86.2% tokens |
 | **R9：15 个 benchmark fixture 里仅 5 个可测量能力** | `behavioral_rate` 混入了「正确修复也会失败」的 fixture，历史 0/15 不是能力数据 | 部分缓解（2026-08-06）：离线审计全部 15 个，判定写入 `benchmarks/tasks/derivability.json`（**不改共享 pin**）；报告改为以 `behavioral_rate_measurable` 领先并列出每个排除项。剩余：3 个 `unverified` 需联网审完；3 个整文件粒度需改 `acceptance_command`（属跨项目决策） |
-| **R10：`AcceptanceHarness` 绕过 `CommandGuard` 的安全声明仍未对用户说明** | 用户从不可信来源接受验收套件 = 任意代码执行。README 只说明 `CommandGuard` 存在，未说验收通道绕过它 | **未缓解**。M6 曾要求「显著标注」，至今未做。修法：CLI 接受 `--harness` 时打印信任级别警告 + README 安全章节 |
+| ~~**R10：`AcceptanceHarness` 绕过 `CommandGuard` 的安全声明仍未对用户说明**~~ | ~~用户从不可信来源接受验收套件 = 任意代码执行。README 只说明 `CommandGuard` 存在，未说验收通道绕过它~~ | ✅ **R10 已关闭**（2026-08-07）：非空套件首次 `run()` 时向 stderr 打印一次信任级别警告（`TRUST_WARNING`），README 新增「验收套件是可执行代码」小节。原计划的「CLI `--harness` 时警告」不可行——**CLI 没有 `--harness` 参数**，harness 只能经 `run_task(harness=...)` 程序化传入，警告挂在 CLI 会覆盖零条调用路径；挂在 `harness.run()` 覆盖全部入口 |
 | 子代理可能被滥用导致成本爆炸 | 单任务成本失控 | `max_turns` 硬上限 + 父级 spawn 数量预算（M4.5 或 M5 补充） |
 | 多数写类 MCP 服务器可能不支持根路径参数 | 可用的写类 server 很少 | 接受这个代价——保住三条件收敛优先于多支持一个 server |
 | skill 的实际收益未量化 | 可能是纯成本 | **仍未量化**（2026-08-06 核对）：`ReplayEngine.skill_impact()` 已实现，但 `.qqcode/trace.db` 为空（0 行），且该库 gitignored、历史 trace 已随临时仓库丢失。需先跑一批真实任务积累 trace |
-| AcceptanceHarness 的安全声明未在 CLI / README 中对用户说明 | 用户可能从不可信来源接受验收套件 | 需在 M6 文档中显著标注 |
+| ~~AcceptanceHarness 的安全声明未在 CLI / README 中对用户说明~~ | ~~用户可能从不可信来源接受验收套件~~ | ✅ 与 R10 同一件事（本行是 R10 编号前的旧记法），2026-08-07 一并关闭 |
 
 ---
 
@@ -394,3 +394,4 @@ qqcode --task "..."  --repo ./myproject  [--mode auto|fast|full]  [--dry-run]
 | 2026-08-06 | **R9 新增并部分缓解**：离线审计 15 个 fixture 的隐藏断言可推导性（5 可推导 / 4 不可推导 / 3 整文件粒度 / 3 未审）。判定存入 `benchmarks/tasks/derivability.json`；报告改以 `behavioral_rate_measurable` 领先。**同时修评测器**：`_run_acceptance` 原先把「隐藏 test_patch 打不上」折叠成 `passed=False`，即把仪器故障记成能力不足，现归为 `incident_type="test_conflict"` |
 | 2026-08-06 | **发现 `benchmarks/tasks/real_tasks_v2.json` 是指向 `claude-engineer` 项目的符号链接**（git 模式 `120000`）。写它会静默修改另一个项目，且本仓库 `git diff` 完全干净——常规的「提交前看 diff」无法发现。故 fixture 审计结论另存独立文件，共享 pin 一字未改 |
 | 2026-08-06 | **R10 新增**：`AcceptanceHarness` 绕过 `CommandGuard` 的信任级别至今未对用户说明（M6 曾要求「显著标注」）。属真实安全缺口，待修 |
+| 2026-08-07 | **R10 关闭**：`AcceptanceHarness.run()` 在非空套件首次执行时向 stderr 打印一次 `TRUST_WARNING`；README「安全隔离」新增小节，说明验收命令不走 `CommandGuard`、为何刻意如此（走 `run_command` 会让测试出现在 agent 的工具日志里，agent 便能迎合测试）、以及仍生效的两条限制（剥离密钥、超时）。**修法与原计划不同**：CLI 并无 `--harness` 参数，警告只能挂在 harness 自身才覆盖真实调用路径。警告走 stderr 而非 stdout，避免污染机读输出；进程内只打一次，批量跑不会刷屏。3 条新测试均做过变异验证（去掉警告调用 / 去掉一次性守卫 / 去掉空套件守卫，各自对应的测试都失败）。604 tests 绿，mypy 0 |

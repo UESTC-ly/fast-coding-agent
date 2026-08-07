@@ -10,6 +10,7 @@ import pytest
 from qqcode.acceptance import (
     ACCEPTANCE_DIR,
     RUNNER_ARTIFACTS,
+    TRUST_WARNING,
     AcceptanceHarness,
     AcceptanceResult,
     AcceptanceTest,
@@ -17,6 +18,7 @@ from qqcode.acceptance import (
     filter_acceptance_paths,
     first_failure,
     is_acceptance_path,
+    reset_trust_warning,
 )
 
 
@@ -231,3 +233,46 @@ def test_acceptance_result_diagnostic_truncates_from_tail() -> None:
     assert len(diag["acceptance_stderr"]) == 100
     assert diag["acceptance_stdout"] == "x" * 100
     assert diag["acceptance_stderr"] == "y" * 100
+
+
+# --- trust-level warning (R10) -------------------------------------------
+# The harness runs acceptance commands outside CommandGuard by design. That
+# choice was only ever documented in a docstring, which the person at risk —
+# whoever runs a suite they did not write — never reads. These tests pin the
+# warning to the moment a suite actually executes.
+
+
+def test_running_a_suite_warns_about_the_trust_level(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    reset_trust_warning()
+    harness = AcceptanceHarness([
+        AcceptanceTest(name="t", command=("python3", "-c", "pass")),
+    ])
+    with tempfile.TemporaryDirectory() as tmp:
+        harness.run(Path(tmp))
+    assert TRUST_WARNING in capsys.readouterr().err
+
+
+def test_trust_warning_is_emitted_only_once_per_process(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    reset_trust_warning()
+    harness = AcceptanceHarness([
+        AcceptanceTest(name="t", command=("python3", "-c", "pass")),
+    ])
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        harness.run(root)
+        capsys.readouterr()  # discard the first warning
+        harness.run(root)
+    assert TRUST_WARNING not in capsys.readouterr().err
+
+
+def test_empty_harness_does_not_warn(capsys: pytest.CaptureFixture[str]) -> None:
+    """No suite ran, so there is nothing to warn about — and a spurious warning
+    would train users to ignore the real one."""
+    reset_trust_warning()
+    with tempfile.TemporaryDirectory() as tmp:
+        AcceptanceHarness([]).run(Path(tmp))
+    assert TRUST_WARNING not in capsys.readouterr().err
