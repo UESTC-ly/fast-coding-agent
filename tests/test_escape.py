@@ -379,8 +379,70 @@ class TestNoResidue:
 
 
 # ---------------------------------------------------------------------------
-# 4. Ignore-list asymmetry between the report and the mirror
+# 4. Whole-file writes to a file that was never read
 # ---------------------------------------------------------------------------
+
+
+class TestUnseenFileOverwrite:
+    """The gate cannot vouch for a file the model was never shown.
+
+    FastPath writes whole-file replacement content, so replacing a file whose
+    text was never inlined means the content came from the model's memory of
+    what such a file usually holds. On finalize the real file is destroyed.
+
+    Nothing downstream catches it in the L0-no-hint shape:
+      - condition 3 only compares when `files_hint` is non-empty, and this is
+        precisely the branch where it is empty
+      - condition 1 needs a harness, which batch callers do not pass
+      - `finalize` is a whole-tree mirror, so the invented file lands
+
+    `SYSTEM_PROMPT` now tells the model not to reconstruct an unread file and to
+    decline instead, which is why real runs decline rather than fabricate. That
+    is cooperation, not enforcement, and this test drives a stub that ignores the
+    prompt entirely -- so it measures the mechanical gap the prompt cannot close.
+
+    The invariant is narrower than "the patch is correct", which no test can
+    decide: FastPath must not silently replace a file it was never shown.
+    """
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "No mechanical guard yet, deliberately. Any check that rejects this "
+            "shape also rejects ~10 existing tests that assert success for a "
+            "patch touching an existing file the task never named -- measured, "
+            "and not separable by narrowing: every one of them reaches the "
+            "check with empty prefetch, exactly like this case. The guard "
+            "belongs with the prefetch locator, which makes the resolved set "
+            "reflect what the task actually needs; refusing the remainder is "
+            "then a backstop rather than a narrowing of FastPath. Remove this "
+            "marker when the locator lands -- strict=True fails on XPASS, so "
+            "it cannot be forgotten."
+        ),
+    )
+    def test_unseen_existing_file_is_not_silently_replaced(
+        self, repo: Path
+    ) -> None:
+        original = (repo / "app.py").read_text()
+        # Task names no path, no files_hint, no prefetch_hint -> zero prefetch.
+        result = run(repo, [submit_patch(
+            ("app.py", "def greet(): return 'invented from scratch'\n"),
+            reasoning="wrote it from scratch since no contents were provided",
+        )], task="make the greeting return a value")
+
+        replaced = (repo / "app.py").read_text() != original
+        assert not (result.success and replaced), (
+            "FastPath replaced a file it never read: prefetch resolved nothing, "
+            "condition 3 was unenforceable with an empty files_hint, condition 1 "
+            "had no harness, and finalize mirrored the invented content onto the "
+            "real file"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 5. Ignore-list asymmetry between the report and the mirror
+# ---------------------------------------------------------------------------
+
 
 class TestIgnoreListAsymmetry:
     """Three ignore lists disagree, and only one of them gates the mirror.
