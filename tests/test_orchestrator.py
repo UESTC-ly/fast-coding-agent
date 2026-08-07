@@ -245,7 +245,16 @@ class TestRunTaskIntegration:
         assert adapter.calls == 3
 
     def test_mode_auto_routes_to_fullagent_directly(self, repo: Path) -> None:
-        result, adapter = _run(repo, [l1_classify("fullagent", 0.95), fa_finish()])
+        """L1 says fullagent, so FastPath is never attempted.
+
+        The task must not match any built-in skill: "test task" matches
+        `pytest-patterns`, whose FAST hint fires L0 and never reaches L1, so this
+        test used to pass while exercising a different path than its name claims.
+        """
+        result, adapter = _run(
+            repo, [l1_classify("fullagent", 0.95), fa_finish()],
+            task="adjust the greeting wording",
+        )
         assert result.success
         assert result.mode_used == "fullagent"
         assert adapter.calls == 2  # routing + FA
@@ -258,6 +267,30 @@ class TestRunTaskIntegration:
         assert len(records) == 1
         assert records[0].mode_used == "fullagent"
         assert records[0].final_success is True
+
+    def test_trace_records_the_recovered_prefetch_count(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """The L0 → L1 recovery must be observable in the trace.
+
+        "test task" matches the built-in `pytest-patterns` skill, so L0 decides
+        FASTPATH with no hint, and the text names no file — the exact branch that
+        declined 4/4 times in the measured baseline. Without this assertion the
+        count can be computed and never recorded, which is the defect shape this
+        repo keeps hitting.
+        """
+        store = TraceStore.for_repo(tmp_path)
+        _run(repo, [l1_classify("fastpath", 0.9), patch_declined()],
+             mode="auto", trace_store=store)
+        records = store.all()
+        store.close()
+
+        assert records[0].prefetch_hint_count == 1, (
+            "L1 named main.py, so the recovered count must reach the trace"
+        )
+        assert records[0].files_hint_count == 0, (
+            "the recovery must not become condition 3's contract"
+        )
 
     def test_trace_records_turns_used(self, repo: Path, tmp_path: Path) -> None:
         store = TraceStore.for_repo(tmp_path)

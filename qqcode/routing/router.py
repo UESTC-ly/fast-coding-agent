@@ -11,7 +11,7 @@ Output: FastPath or FullAgent decision + file hints for shadow workspace.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from qqcode.models.billing import BilledClient
@@ -24,6 +24,7 @@ from qqcode.models.protocol import (
     TextContent,
     ToolUseContent,
 )
+from qqcode.routing.fastpath import names_a_path
 from qqcode.skills import RoutingHint, SkillIndex
 
 
@@ -41,6 +42,11 @@ class RoutingResult:
     decision: RoutingDecision
     confidence: float  # 0.0-1.0 from L1, or 1.0 from L0/L2
     files_hint: tuple[str, ...]  # Expected touched files
+    # Files to inline into the FastPath prompt, and nothing more. `files_hint`
+    # doubles as condition 3's contract (`diff ⊆ files_hint`), so a guess placed
+    # there turns a decline into a wrong rejection of a correct patch. This field
+    # carries a guess safely: advisory for prefetch, never enforced.
+    prefetch_hint: tuple[str, ...] = ()
     reasoning: str = ""  # L1 explanation or L0/L2 rule trigger
     # Trace metadata — which layer decided and what the raw L1 said.
     layer: str = ""             # "l0" | "l1_l2" | "fallback"
@@ -134,7 +140,7 @@ def route_task(
     # L0: Static features
     l0_result = _l0_classify(task, skill_index, t)
     if l0_result:
-        return l0_result
+        return _add_prefetch_hint(l0_result, task, client)
 
     # L1: Cheap classifier (requires client)
     if client:
@@ -207,6 +213,45 @@ def _l0_classify(
 
     # Insufficient evidence → proceed to L1
     return None
+
+
+def _add_prefetch_hint(
+    l0_result: RoutingResult, task: str, client: BilledClient | None
+) -> RoutingResult:
+    """Ask L1 which files an L0 FastPath decision should inline.
+
+    L0 decides *that* a task is simple without identifying *which* files it
+    touches, so FastPath arrives with nothing to prefetch. Recovering names from
+    the task text only works when the text names one; real issue reports
+    ("Fix INTERNALERROR when saferepr() raises") name none, and the prompt still
+    claims file contents were provided — so the model takes the documented exit
+    and the whole call is wasted. Measured: 4/4 such runs declined, ~23k-44k
+    tokens each, against 5.8k for the same task when a hint existed.
+
+    L1 already produces file names as a side effect of classifying, and one L1
+    call is cheaper than one wasted FastPath call. Its *verdict* is discarded:
+    L0 fired, so the decision is already made and re-deciding here would let a
+    disagreeing L1 silently overturn a deterministic layer.
+
+    The names land in `prefetch_hint`, never `files_hint` — see `RoutingResult`.
+    """
+    if client is None or l0_result.decision is not RoutingDecision.FASTPATH:
+        return l0_result
+    # A hint already exists, so there is nothing to recover and no call to spend.
+    if l0_result.files_hint:
+        return l0_result
+    # The task already names a file, so prefetch can recover it from the text for
+    # free and more reliably than a classifier that never saw the repository.
+    # Spending a call here would buy nothing. This is a string test on purpose:
+    # `route_task` has no workspace, so whether the name *resolves* is not
+    # knowable here — only whether one was offered.
+    if names_a_path(task):
+        return l0_result
+
+    l1_result = _l1_classify(task, client)
+    if l1_result is None or not l1_result.files_hint:
+        return l0_result
+    return replace(l0_result, prefetch_hint=l1_result.files_hint)
 
 
 def _l1_classify(task: str, client: BilledClient) -> RoutingResult | None:

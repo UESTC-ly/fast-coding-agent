@@ -156,11 +156,13 @@ def run_task(
         record.l2_override = routing.l2_override
         record.l2_reason = routing.reasoning if routing.l2_override else ""
         record.files_hint_count = len(routing.files_hint)
+        record.prefetch_hint_count = len(routing.prefetch_hint)
 
     if routing.decision == RoutingDecision.FASTPATH:
         fp_result, esc = _try_fastpath(
             task, repo, client, skill_index, routing.files_hint, harness, dry_run, record,
             confirm=confirm, seed=seed, history=history,
+            prefetch_hint=routing.prefetch_hint,
         )
         if fp_result is not None:
             _finalise_trace(record, fp_result, ledger, time.monotonic() - t0, trace_store)
@@ -225,6 +227,7 @@ def _try_fastpath(
     confirm: ConfirmCallback | None = None,
     seed: Seed = "head",
     history: str = "",
+    prefetch_hint: tuple[str, ...] = (),
 ) -> tuple[RunResult | None, str]:
     """Attempt FastPath in a fresh shadow workspace.
 
@@ -242,6 +245,7 @@ def _try_fastpath(
             skill_index=skill_index,
             tool_registry=default_registry(),
             files_hint=files_hint,
+            prefetch_hint=prefetch_hint,
             history=history,
         )
         fp = execute_fastpath(inp, workspace, client, harness=harness)

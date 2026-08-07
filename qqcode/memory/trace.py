@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS traces (
     l2_override INTEGER NOT NULL DEFAULT 0,
     l2_reason TEXT NOT NULL DEFAULT '',
     files_hint_count INTEGER NOT NULL DEFAULT 0,
+    prefetch_hint_count INTEGER NOT NULL DEFAULT 0,
     task_length INTEGER NOT NULL,
     fastpath_attempted INTEGER NOT NULL DEFAULT 0,
     fastpath_success INTEGER NOT NULL DEFAULT 0,
@@ -58,7 +59,7 @@ INSERT INTO traces (
     id, task_hash, task_snippet, timestamp, duration_ms,
     route_layer, route_decision, l0_triggered, l0_reason,
     l1_decision, l1_confidence, l2_override, l2_reason,
-    files_hint_count, task_length,
+    files_hint_count, prefetch_hint_count, task_length,
     fastpath_attempted, fastpath_success, fastpath_reason,
     final_success, mode_used, finish_reason,
     tokens_routing, tokens_fastpath, tokens_fullagent, tokens_total,
@@ -67,7 +68,7 @@ INSERT INTO traces (
     :id, :task_hash, :task_snippet, :timestamp, :duration_ms,
     :route_layer, :route_decision, :l0_triggered, :l0_reason,
     :l1_decision, :l1_confidence, :l2_override, :l2_reason,
-    :files_hint_count, :task_length,
+    :files_hint_count, :prefetch_hint_count, :task_length,
     :fastpath_attempted, :fastpath_success, :fastpath_reason,
     :final_success, :mode_used, :finish_reason,
     :tokens_routing, :tokens_fastpath, :tokens_fullagent, :tokens_total,
@@ -102,6 +103,10 @@ class TraceRecord:
     l2_override: bool = False
     l2_reason: str = ""
     files_hint_count: int = 0
+    # Advisory prefetch paths recovered from L1 when L0 decided without a hint.
+    # Recorded separately from files_hint_count because only the latter is the
+    # condition-3 contract; conflating them would hide which one a run relied on.
+    prefetch_hint_count: int = 0
     task_length: int = 0
 
     # FastPath outcome (only meaningful when route_decision == "fastpath")
@@ -151,6 +156,7 @@ class TraceRecord:
             "l2_override": int(self.l2_override),
             "l2_reason": self.l2_reason,
             "files_hint_count": self.files_hint_count,
+            "prefetch_hint_count": self.prefetch_hint_count,
             "task_length": self.task_length,
             "fastpath_attempted": int(self.fastpath_attempted),
             "fastpath_success": int(self.fastpath_success),
@@ -185,6 +191,9 @@ class TraceRecord:
             l2_override=bool(d["l2_override"]),
             l2_reason=d["l2_reason"],
             files_hint_count=d["files_hint_count"],
+            # .get, like turns_used: a DB written before this column existed is
+            # readable rather than a crash.
+            prefetch_hint_count=d.get("prefetch_hint_count", 0),
             task_length=d["task_length"],
             fastpath_attempted=bool(d["fastpath_attempted"]),
             fastpath_success=bool(d["fastpath_success"]),
@@ -232,6 +241,11 @@ class TraceStore:
             if "finish_summary" not in cols:
                 conn.execute(
                     "ALTER TABLE traces ADD COLUMN finish_summary TEXT NOT NULL DEFAULT ''"
+                )
+            if "prefetch_hint_count" not in cols:
+                conn.execute(
+                    "ALTER TABLE traces ADD COLUMN "
+                    "prefetch_hint_count INTEGER NOT NULL DEFAULT 0"
                 )
             conn.commit()
             self._conn = conn

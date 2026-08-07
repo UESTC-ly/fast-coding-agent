@@ -301,3 +301,58 @@ class TestReplayEngine:
     def test_skill_impact_empty(self) -> None:
         engine = ReplayEngine([])
         assert engine.skill_impact() == []
+
+
+class TestPrefetchHintTrace:
+    """`prefetch_hint_count` is the observation point for the L0 → L1 recovery.
+
+    Without it, a run that recovered files and one that found none look identical
+    in the trace, so a failed experiment cannot be told apart from a fallback
+    that never fired.
+    """
+
+    def test_prefetch_hint_count_survives_a_round_trip(self, tmp_path: Path) -> None:
+        store = TraceStore(tmp_path / ".qqcode/trace.db")
+        r = TraceRecord.from_task("fix the thing")
+        r.route_decision = "fastpath"
+        r.mode_used = "fastpath"
+        r.finish_reason = "fastpath_ok"
+        r.files_hint_count = 0
+        r.prefetch_hint_count = 2
+
+        store.write(r)
+        records = store.all()
+        store.close()
+
+        assert records[0].prefetch_hint_count == 2
+        assert records[0].files_hint_count == 0, (
+            "the advisory count must not leak into the contract count"
+        )
+
+    def test_a_database_without_the_column_is_still_readable(self, tmp_path: Path) -> None:
+        """Users have existing trace databases. `CREATE TABLE IF NOT EXISTS` does
+        not add columns, so without a migration every write would fail."""
+        import sqlite3
+
+        db = tmp_path / ".qqcode/trace.db"
+        db.parent.mkdir(parents=True, exist_ok=True)
+
+        # Build a pre-migration database: real schema minus the new column.
+        from qqcode.memory.trace import _CREATE_TABLE
+
+        legacy = _CREATE_TABLE.replace(
+            "    prefetch_hint_count INTEGER NOT NULL DEFAULT 0,\n", ""
+        )
+        assert "prefetch_hint_count" not in legacy, "legacy schema still has the column"
+        conn = sqlite3.connect(db)
+        conn.execute(legacy)
+        conn.commit()
+        conn.close()
+
+        store = TraceStore(db)
+        store.write(TraceRecord.from_task("written after the migration"))
+        records = store.all()
+        store.close()
+
+        assert len(records) == 1
+        assert records[0].prefetch_hint_count == 0

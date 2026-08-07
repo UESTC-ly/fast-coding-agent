@@ -456,3 +456,120 @@ class TestReachableFromRunTask:
 
         assert "### calc.py" in sent
         assert "return a / b" in sent
+
+
+class TestAdvisoryHintReachesThePrompt:
+    """The L0 → L1 recovery must reach the prompt, not just the router.
+
+    Computing a value and failing to wire it is this repo's recurring defect
+    shape, and a direct call to `resolve_prefetch_paths` cannot catch it. These
+    run through `run_task`, the way production does.
+    """
+
+    def _run(self, repo: Path, task: str, l1_files: list[str]) -> str:
+        """Answer L1 with a classification, then capture the FastPath prompt."""
+        from qqcode.config import Config, ProviderConfig
+        from qqcode.models.billing import RetryPolicy
+        from qqcode.models.protocol import CostLedger
+        from qqcode.orchestrator import run_task
+
+        prompts: list[str] = []
+
+        class ScriptedAdapter:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def invoke(self, messages: list[object], **kwargs: object) -> Completion:
+                self.calls += 1
+                text = "\n".join(
+                    block.text
+                    for msg in messages  # type: ignore[attr-defined]
+                    for block in msg.content  # type: ignore[attr-defined]
+                    if isinstance(block, TextContent)
+                )
+                # `BilledClient` consumes `phase`, so it never reaches the
+                # adapter; the classifier's own system prompt identifies the call.
+                if "task routing classifier" in text:
+                    return Completion(
+                        content=[ToolUseContent(
+                            id="l1",
+                            name="classify_task",
+                            input={
+                                "decision": "fastpath",
+                                "confidence": 0.9,
+                                "files": l1_files,
+                                "reasoning": "simple",
+                            },
+                        )],
+                        stop_reason="tool_use",
+                        usage=Usage(input_tokens=10, output_tokens=5),
+                        raw={},
+                    )
+                prompts.append(text)
+                return Completion(
+                    content=[ToolUseContent(
+                        id="fp1",
+                        name=PATCH_TOOL_NAME,
+                        input={"reasoning": "done", "files": []},
+                    )],
+                    stop_reason="tool_use",
+                    usage=Usage(input_tokens=10, output_tokens=5),
+                    raw={},
+                )
+
+        client = BilledClient(
+            ScriptedAdapter(),
+            ledger=CostLedger(),
+            retry_policy=RetryPolicy(max_attempts=1, sleep=lambda _: None),
+        )
+        config = Config(
+            anthropic=ProviderConfig(api_key="fake", base_url=None),
+            openai=None,
+            default_provider="anthropic",
+        )
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "qqcode.orchestrator.build_client",
+                lambda *a, **k: (client, client._ledger),  # noqa: SLF001
+            )
+            run_task(task=task, repo=repo, config=config, mode="auto", dry_run=True)
+
+        assert prompts, "FastPath was never reached"
+        return prompts[0]
+
+    @pytest.fixture
+    def repo(self, tmp_path: Path) -> Path:
+        (tmp_path / "saferepr.py").write_text("def saferepr(obj):\n    return repr(obj)\n")
+        return tmp_path
+
+    def test_statement_naming_no_file_still_gets_code_in_the_prompt(self, repo: Path) -> None:
+        """The measured defect: a real issue report names no file at all.
+
+        "Add a docstring" fires L0's FAST skill hint, and the statement offers no
+        filename, so before this fix the prompt claimed file contents were
+        provided while containing none.
+        """
+        sent = self._run(repo, "Add a docstring where repr is computed", ["saferepr.py"])
+
+        assert "### saferepr.py" in sent
+        assert "return repr(obj)" in sent
+
+    def test_a_hallucinated_path_is_dropped_rather_than_inlined(self, repo: Path) -> None:
+        """L1 never saw the repo, so its names are guesses that must be verified.
+
+        Asserted on the resolved tuple, not the prompt: `_prefetch_files` already
+        skips unreadable paths, so a prompt-level check passes either way and
+        cannot tell a verified resolution from an unverified one.
+        """
+        from qqcode.routing.fastpath import resolve_prefetch_paths
+        from qqcode.workspace.worktree import WorktreeWorkspace
+
+        with WorktreeWorkspace(repo, use_git=False) as ws:
+            resolved = resolve_prefetch_paths(
+                "Add a docstring where repr is computed", (), ws,
+                ("does_not_exist.py", "saferepr.py"),
+            )
+
+        assert resolved == ("saferepr.py",), (
+            "an unverified guess must be dropped, not passed through"
+        )

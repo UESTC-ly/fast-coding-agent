@@ -144,6 +144,10 @@ class FastPathInput:
     # Expected touched files, from L0/L1. Empty means the diff check cannot be
     # enforced — see `execute_fastpath` for why that is not a silent pass.
     files_hint: tuple[str, ...] = ()
+    # Files to inline when `files_hint` is empty. Advisory only: read for prompt
+    # context, never compared against the diff. Kept separate from `files_hint`
+    # precisely so a guess cannot become condition 3's contract.
+    prefetch_hint: tuple[str, ...] = ()
     # Digest of earlier turns. Empty in batch mode. FastPath is a single call,
     # so this is its only chance to learn what "that change" refers to.
     history: str = ""
@@ -264,8 +268,22 @@ def _build_messages(
     return messages
 
 
+def names_a_path(task: str) -> bool:
+    """Whether the task text offers at least one filename to prefetch.
+
+    Exposed for the router, which must decide whether recovering names from text
+    is even possible before it spends a call asking a model for them. Shares
+    `_PATH_TOKEN` with `resolve_prefetch_paths` so the two cannot disagree about
+    what counts as a filename.
+    """
+    return bool(_PATH_TOKEN.search(task))
+
+
 def resolve_prefetch_paths(
-    task: str, files_hint: tuple[str, ...], workspace: Workspace
+    task: str,
+    files_hint: tuple[str, ...],
+    workspace: Workspace,
+    prefetch_hint: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     """Decide which files to inline into the prompt.
 
@@ -285,13 +303,20 @@ def resolve_prefetch_paths(
     The result deliberately does not flow back into `files_hint`. Feeding it
     there would turn a guess into a contract and reject correct patches that
     touch a file the task never named — trading a decline for a wrong rejection.
+
+    `prefetch_hint` is the same idea from the other direction: a guess the router
+    obtained (L1 names files even when L0 made the decision) that is safe to read
+    but must never be enforced. Text extraction is tried first because the task
+    naming a file is stronger evidence than a classifier's guess about it; the
+    hint is the fallback for statements that name no file at all, which is what
+    real issue reports look like.
     """
     if files_hint:
         return files_hint
 
     candidates = [raw.lstrip("./") for raw in _PATH_TOKEN.findall(task)]
     if not candidates:
-        return ()
+        return _resolve_advisory(prefetch_hint, workspace)
 
     resolved: list[str] = []
     unresolved: list[str] = []
@@ -315,7 +340,27 @@ def resolve_prefetch_paths(
             if match is not None:
                 _append_unique(resolved, match)
 
-    return tuple(sorted(resolved)[:MAX_PREFETCH_RESOLVED_FILES])
+    if resolved:
+        return tuple(sorted(resolved)[:MAX_PREFETCH_RESOLVED_FILES])
+
+    # The task named files but none of them exist. The advisory hint is the only
+    # remaining source, and sending nothing is the outcome being fixed here.
+    return _resolve_advisory(prefetch_hint, workspace)
+
+
+def _resolve_advisory(prefetch_hint: tuple[str, ...], workspace: Workspace) -> tuple[str, ...]:
+    """Keep the advisory paths that name a readable file in this workspace.
+
+    Verification is not optional. These names come from a classifier that never
+    saw the repository, so they are plausible-looking guesses: a wrong one either
+    fails the read or, worse, inlines an unrelated file as authoritative context.
+    Containment goes through the workspace guard, like every other prefetch path.
+
+    Unlike `files_hint`, a non-existent path is dropped rather than kept. A hint
+    means "create this"; an advisory guess about an existing bug does not.
+    """
+    verified = [p for p in prefetch_hint if _is_file(workspace, p)]
+    return tuple(sorted(verified)[:MAX_PREFETCH_RESOLVED_FILES])
 
 
 def _find_unique_shallow(workspace: Workspace, basename: str) -> str | None:
@@ -394,7 +439,9 @@ def execute_fastpath(
         normal outcome, not an error.
     """
     _, skills = inp.skill_index.select("fastpath", task=inp.task, paths=inp.files_hint)
-    prefetch_paths = resolve_prefetch_paths(inp.task, inp.files_hint, workspace)
+    prefetch_paths = resolve_prefetch_paths(
+        inp.task, inp.files_hint, workspace, inp.prefetch_hint
+    )
     file_contents = _prefetch_files(prefetch_paths, workspace)
     messages = _build_messages(inp.task, [s.body for s in skills], file_contents, inp.history)
 
