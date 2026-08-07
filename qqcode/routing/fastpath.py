@@ -224,9 +224,15 @@ Produce a complete patch by calling {PATCH_TOOL_NAME}. Rules:
   pass, return an empty files array and say why in reasoning. That is a useful
   answer, not a failure — it routes the task to a more capable agent.
 
-Current file contents (if any exist) are provided below the task description.
-Base your patch on them rather than refusing to work. Missing files mean you are
-creating them from scratch.
+About the code you can see:
+- Only the files listed under "Current file contents" have been read for you.
+  Base your edits on that text and preserve everything in it you were not asked
+  to change.
+- A file NOT listed there has not been read. That says nothing about whether it
+  exists. Do not reconstruct such a file from memory of what it probably
+  contains: you write whole files, so a guess silently destroys the real one.
+  Return an empty files array instead and name the file you need in reasoning.
+- Creating a genuinely new file is still fine when the task calls for one.
 """
 
 
@@ -588,8 +594,12 @@ def _extract_patch(content: list[ContentBlock]) -> dict[str, Any] | None:
 def _prefetch_files(paths: tuple[str, ...], workspace: Workspace) -> dict[str, str]:
     """Read files the model is expected to modify and cap to budget.
 
-    Files that don't exist or fail to read are silently omitted. The model sees
-    their absence and knows to treat them as new files rather than edits.
+    Files that don't exist or fail to read are silently omitted, and the omission
+    is not self-describing: absence means "not read", which is a different claim
+    from "does not exist". Do not infer the latter — a path dropped here because
+    it exceeded the budget or failed a guard check names a file that is still
+    very much on disk. `SYSTEM_PROMPT` tells the model the same thing, because a
+    whole-file write based on the wrong inference destroys the real file.
     """
     contents: dict[str, str] = {}
     total_chars = 0
@@ -604,7 +614,7 @@ def _prefetch_files(paths: tuple[str, ...], workspace: Workspace) -> dict[str, s
             contents[path] = text
             total_chars += len(text)
         except Exception:
-            pass  # missing or unreadable; model will create it from scratch
+            pass  # missing, over budget, or guard-refused — indistinguishable here
 
     return contents
 
