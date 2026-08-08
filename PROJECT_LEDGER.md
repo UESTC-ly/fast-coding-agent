@@ -330,7 +330,7 @@ qqcode --task "..."  --repo ./myproject  [--mode auto|fast|full]  [--dry-run]
 |------|------|------|
 | 词法定位器 | `qqcode/routing/locate.py` | `locate_files`：IDF 排序 + 文件名词干前缀 + 测试文件降权；有界目录遍历 |
 | 预取接线 | `qqcode/routing/fastpath.py` | `_resolve_advisory_or_locate`：建议 hint 能验证则用它，否则用定位器 |
-| 测试 | `tests/test_locate.py` | 30 条 |
+| 测试 | `tests/test_locate.py` | 32 条（`76d4fa5` 补了 2 条 prompt 级接线测试） |
 
 **生产路径实测 recall@3**（5 条 derivable 语句，cap=3，无 `files_hint` 无 `prefetch_hint`，即上述 4/4 必败的形状）：
 
@@ -348,12 +348,22 @@ qqcode --task "..."  --repo ./myproject  [--mode auto|fast|full]  [--dry-run]
 
 **成本边界（实测）**：读+排序吞吐约 70MB/s，220 文件 / 2.3MB 约 50ms。本仓库原始树有约 6 万个被 gitignore 的 `.py`（`benchmarks/results/` 下的仓库副本），触发 2000 文件上限，115ms 后返回空。生产用 `use_git=True`，worktree 只有 71 个被跟踪的 `.py`，上限只是兜底。
 
-**已验证的不变量**（变异测试 18/20，6 个接线类变异全杀）：
+**已验证的不变量**（变异测试 20/22，8 个接线类变异全杀）：
 - 定位器结果只进 `prefetch_hint`，永不进 `files_hint`（后者兼任条件 3 契约，猜错是拒绝正确补丁而非浪费 token）
 - 建议 hint 能验证时优先于定位器
 - hint 指向不存在的文件时定位器不顶替它（那是「创建」语义）
 - 测试文件降权而非排除；词干前缀下限 5 字符；树超上限返回空而非截断排名
+- **定位到的文件内容真的进了 prompt**（`76d4fa5`，经 `run_task` 断言，非 `resolve_prefetch_paths` 层）
 - 两个存活变异是构造上冗余，测试里已写明，不假装覆盖
+
+**变异 harness 自身的两个缺陷（2026-08-08 实测修复，`/tmp/qq_mutate_locate.py`）**。两者都会把「没测到」伪装成结果，方向都是危险的那一侧：
+
+| 缺陷 | 机制 | 后果 | 修法 |
+|------|------|------|------|
+| 陈旧字节码 | CPython 按 (源文件 mtime 整秒, 字节数) 校验 `.pyc`。`UBIQUITY_CUTOFF = 0.5` → `1.1` 字节数不变（13439 → 13439），改写落在同一秒内时旧 `.pyc` 被判为有效 | 变异成为空操作，却报告 **SURVIVED**（诬告测试无效）。实测 3 次试验中 2 次复现：磁盘上是 `1.1`，新进程 `import` 看到 `0.5` | 清 `__pycache__` + `PYTHONDONTWRITEBYTECODE=1`；并对 `NAME = 字面量` 类变异在子进程中核实新值可见，不可见则报 NO-OP 而非 SURVIVED |
+| selector 命中零条 | `run_test` 以 `returncode == 0` 判通过，而 pytest 在 selector 匹配不到任何测试时退出码为 4 | 拼错的 selector **永久报告 killed**（虚报覆盖）。本轮我新加的 2 个 case 正是这样，先被虚报为 killed | 变异任何文件之前先 `--collect-only` 验每个 selector 至少命中 1 条，否则中止 |
+
+修正后重跑：交接记载的 `18/20` 在原 20 个 case 上**精确复现**（18 killed / 2 survived），所以那个数字本身是对的 —— 缺陷是非确定性的，上一轮恰好没触发。加上本轮 2 个新 case 后为 20/22。
 
 ---
 
@@ -412,9 +422,9 @@ qqcode --task "..."  --repo ./myproject  [--mode auto|fast|full]  [--dry-run]
 | ~~AcceptanceHarness 的安全声明未在 CLI / README 中对用户说明~~ | ~~用户可能从不可信来源接受验收套件~~ | ✅ 与 R10 同一件事（本行是 R10 编号前的旧记法），2026-08-07 一并关闭 |
 | **R11：benchmark 从不传 `harness=`，条件 1 在评测里恒空** | 所有 `behavioral_rate` 都不是三条件收敛的产物，而是跑完之后另打 `test_patch` 评出来的；**零逃逸这条指标在这批数据里完全没测**（17 次运行触发信任警告 0 次，反证 harness 通道从未走过） | 已核实：`benchmarks/qqcode_benchmark.py:698` 的 `run_task(...)` 参数表无 `harness=`；全文件仅 `_harness_ran`（223 行定义，795 行调用）在**检测输出里的信任警告**，不是注入。**修法不是简单补上**——把上游 `test_patch` 当 harness 会让 `build_escalation_context` 把 pytest 断言差异喂进 FullAgent 的 prompt，等于告诉 agent 答案，通过率会虚高。需要先设计一个不泄漏断言内容的诊断通道 |
 | **R12：未读文件可能被整文件写入静默覆盖** | 模型凭记忆重建一个它没读过的文件 = 销毁真文件。FastPath 写整文件，所以这是数据丢失级缺陷 | 部分缓解（2026-08-07）：prompt 侧已修（`ebf04fd`，删掉「缺席即不存在」那句假话）+ `_prefetch_files` docstring 纠正同一处误推。机械守卫**未落地**，用 `strict=True` xfail 钉住（`62764fa`）。当初判定「守卫不可分离」的依据是「碰撞的 ~10 个测试全部带空 prefetch 到达检查点」。**已验证（2026-08-07，零 API）：前提仍成立，且碰撞面变宽而非收窄 —— 临时插回最小守卫跑全套，660 passed/0 failed → 648 passed/13 failed（定位器落地前是 10）。测试一行未改。** 定位器没有消解碰撞：它填的 3 个预取槽未必是补丁要写的文件。附带发现：失败名单里含 `test_real_hint_still_enforces_condition_three`（`files_hint` 非空的用例），说明「存在于磁盘且不在预取里就拒」这条太粗——真正的守卫至少要豁免 `files_hint` 显式声明的路径（任务已授权）。xfail 维持 |
-| **R13：定位器摆错层（`0f50c4b`）** | 它现在在 FastPath 内当能力补丁，而非在路由层当信号 | 已定性未修：正确形态是路由层判「答案集中→FastPath 带文件 / 发散或空→FullAgent」，实现缝在建完 workspace、发请求之前（路由决策时 workspace 尚不存在，那是第一个能知道文件名是否真解析的地方）。之前搁置的「预取注定为空就转 FullAgent」的门与此合成同一个决定 |
-| **R14：FullAgent 在这批任务上只有一次残缺门下的观测** | 「转给 FullAgent 是正确路由」目前是假设不是结论 | 已有数字但有已知缺陷：full 4/9 = 44.4%、43,080 tokens/run（同 R11 的空条件 1）。同一批里 automatic 是 6/8 = 75%、30,625 tokens——**双档在成功率和成本上同时赢过纯 FullAgent**，这是支持双档架构本身的直接证据。样本 n 小，需要 `--cycles ≥ 3` 复测 |
-| **R15：`success \| right file` 仅 n=2** | 定位器 60% recall 的全部价值押在这一环上；文件给对了但补丁还是错，前面省的都白算 | 未测。需真实 API，跑前先给成本预估。这是当前主线的真卡点 |
+| **R13：定位器摆错层（`0f50c4b`）** | 它现在在 FastPath 内当能力补丁，而非在路由层当信号 | **降级为「不做」（2026-08-08 实测，零 API）**。原计划是路由层判「答案集中→FastPath 带文件 / 发散或空→FullAgent」。两处实测否决了它：**(1) 集中度阈值不可信** —— `gap_1_2`（top1/top2 分数比）确实分开命中 [1.274, 1.42, 1.431] 与未命中 [1.052, 1.139]，但共测 5 个统计量，3 命中/2 未命中下单个统计量偶然分开的概率 0.2，期望偶然分开数恰为 1.0，实得 1 个；留出集拿不到（bare cache 为 shallow，仅 15 个 commit 且正是 fixture 自身，本仓库 25 个 commit）。**(2) 逐 fixture 推演下它零判决改变** —— skipif 命中 rank 1 会带文件走 FastPath，但那正是 `fastpath.py:386` 今天已在做的事；saferepr 已有 L1 hint 不变；dynamic-xfail miss 会转 FullAgent，而配对数据显示同 fixture 升级 2/2 @39k、直送 2/2 @40k，只省 token；click 的 L1 判了 fullagent，`orchestrator.py:161` 根本不进 `_try_fastpath`，门不执行。按反漂移判据答案是「不能」。搁置的「预取注定为空就转 FullAgent」门同此归类：纯省 token 的配套 |
+| **R14：FullAgent 在这批任务上只有一次残缺门下的观测** | 「转给 FullAgent 是正确路由」目前是假设不是结论 | 已有数字但有已知缺陷：full 4/9 = 44.4%、43,080 tokens/run（同 R11 的空条件 1）。同一批里 automatic 是 6/8 = 75%、30,625 tokens——**双档在成功率和成本上同时赢过纯 FullAgent**。**但 2026-08-08 逐 fixture 配对纠正了这个差距的归因**（读 `runs.json` 17 行 + 17 个 `trace.db`）：dynamic-xfail 2/2 vs 2/2、skipif 2/2 vs 2/2、click 0/2 vs 0/2 —— **「升级带诊断」的增量是 0**；全部差距来自 saferepr（automatic 2/2 @5.8k vs full 0/2 @43k，FastPath 直接成功）加上只在 full 臂跑过的 importlib（0/1 @86k，去掉它 full 为 4/8 = 50%）。所以支持双档的证据比原记载更强也更窄：**赢在 FastPath 成功时便宜 7 倍且修好了 FullAgent 做不对的 fixture，不在于失败调用的诊断价值**。样本 n 小，需要 `--cycles ≥ 3` 复测 |
+| **R15：`success \| right file` 仅 n=2** | 定位器 60% recall 的全部价值押在这一环上；文件给对了但补丁还是错，前面省的都白算 | 未测（需真实 API）。**但 2026-08-08 读 17 个 `trace.db` 后因果链已闭合到机制层**：全 17 行中 `files_hint_count > 0` 只出现在唯一成功的两次（saferepr，l1_l2 路由 0.86/0.88，5.8k tokens），`= 0` 的四次全部 declined（23k–44k）。`>0 → 2/2` 对 `=0 → 4/4`，n=6 但完全分离，且这是机制不是拟合阈值：模型看见代码就出补丁，看不见就走文档化出口。**这批数据全部早于定位器**（ABBA 于 2026-08-07 15:09，`0f50c4b` 于 2026-08-08 21:16），而定位器对 skipif 命中 rank 1、形状与 saferepr 靠 L1 拿到文件相同。**可检验预测**：skipif 从 24k 的 decline 变为约 6k 的 FastPath 成功。接线已由 `76d4fa5` 用 prompt 级断言 + 变异钉住，所以这个预测测得到东西。这是当前主线的真卡点 |
 
 ---
 
