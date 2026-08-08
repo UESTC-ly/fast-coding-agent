@@ -361,6 +361,32 @@ def _apply_acceptance_result(record: RunRecord, outcome: AcceptanceOutcome) -> N
     record.acceptance_output = _clip(outcome.output, 1200)
     if outcome.conflict and record.incident_type is None:
         record.incident_type = INCIDENT_TEST_CONFLICT
+    elif not outcome.passed and record.incident_type is None:
+        # The docstring above promises both call sites attribute identically,
+        # and until now only the verify path kept that promise: it screens
+        # acceptance output through `_harness_ran` before calling a failure the
+        # agent's, while this path charged every failure to the agent.
+        #
+        # Measured cost of the gap, on the 08-07 batch: all four
+        # click-borrowed-pager-stdout runs recorded `agent_success=True` beside
+        # `No module named pytest` — the fixture declares no runtime_packages, so
+        # acceptance ran in a venv without pytest and could not pass under any
+        # patch — yet each was filed as a clean behavioral failure with
+        # `incident_type=None`, and so counted against the agent in every rate.
+        # A load-dependent 180s acceptance timeout reaches this branch the same
+        # way.
+        #
+        # Only failures are screened. A pass is never reclassified: pytest that
+        # reports success has self-evidently run, and re-deciding that from
+        # output text could only ever discard a real result.
+        #
+        # `_harness_ran` is a whitelist of pytest's own report markers rather
+        # than a blacklist of exception names, so a test that fails *because* of
+        # a FileNotFoundError still reads as "the harness ran" and stays the
+        # agent's failure. That direction matters: this branch must not become a
+        # way for genuine failures to be excused as infrastructure.
+        if not _harness_ran(outcome.output):
+            record.incident_type = "environment"
 
 
 class TestPatchConflictError(RuntimeError):

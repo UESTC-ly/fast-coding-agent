@@ -133,25 +133,126 @@ class TestTestPatchConflictErrorIsAnIncident:
         )
         assert not result.conflict, "an applicable patch must not be called a conflict"
 
+
+class TestRunnerNeverStartedIsAnIncident:
+    """A failure with no pytest output at all is apparatus, not incapacity.
+
+    `--verify-fixtures` already screened this through `_harness_ran`, and
+    `_apply_acceptance_result`'s docstring claims both call sites attribute
+    identically. The execute path did not, so any fault that stopped pytest
+    before it ran was charged to the agent.
+
+    Measured cost on the 2026-08-07 batch: all four click-borrowed-pager-stdout
+    runs recorded `agent_success=True` beside `No module named pytest` -- that
+    fixture declares no `runtime_packages`, so acceptance ran in a venv with no
+    pytest and could not pass under any patch -- and every one was filed as a
+    clean behavioral failure. A load-dependent 180s acceptance timeout arrives
+    the same way: the same fixture ran in 4s alone and timed out inside a
+    five-fixture batch.
+    """
+
+    def _applied(self, output: str, *, passed: bool = False) -> Any:
         record = _record()
-        bench._apply_acceptance_result(record, result)
-        assert record.incident_type is None, (
-            "a genuine test failure must remain an agent verdict"
+        bench._apply_acceptance_result(
+            record,
+            bench.AcceptanceOutcome(passed=passed, output=output, conflict=False),
+        )
+        return record
+
+    def test_missing_interpreter_module_is_an_environment_incident(self) -> None:
+        """The exact output the four click runs produced."""
+        record = self._applied(
+            "/path/to/benchmarks/.cache/venvs/default/bin/python: "
+            "No module named pytest"
         )
 
-    def test_conflict_is_excluded_from_the_rate(self) -> None:
-        """A conflicted run must not count as a denominator entry.
+        assert record.incident_type == "environment"
+        assert record.behavioral_complete is False
 
-        `incident_type` already drives that exclusion, so this pins the
-        end-to-end consequence rather than the mechanism.
+    def test_acceptance_timeout_is_an_environment_incident(self) -> None:
+        """What `_run_cmd` returns when a command exceeds `_ACCEPT_TIMEOUT`."""
+        record = self._applied("[timed out after 180s]")
+
+        assert record.incident_type == "environment"
+
+    def test_tests_that_ran_and_failed_stay_the_agents_failure(self) -> None:
+        """The control that stops this branch excusing real incapacity."""
+        record = self._applied(
+            "=================== FAILURES ===================\n"
+            "FAILED tests/test_thing.py::test_one - assert 1 == 2\n"
+            "1 failed, 2 passed in 0.4s"
+        )
+
+        assert record.incident_type is None, (
+            "a real test failure must not be excused as infrastructure"
+        )
+        assert record.behavioral_complete is False
+
+    def test_a_failure_whose_traceback_names_an_exception_is_not_excused(self) -> None:
+        """Why `_harness_ran` is a whitelist, not an exception-name blacklist.
+
+        A test that fails *because* of FileNotFoundError is the agent's failure.
+        Screening on exception names would mislabel it as apparatus.
+        """
+        record = self._applied(
+            "E   FileNotFoundError: [Errno 2] No such file or directory: 'cfg'\n"
+            "1 failed in 0.2s"
+        )
+
+        assert record.incident_type is None
+
+    def test_a_passing_run_is_never_reclassified(self) -> None:
+        """Only failures are screened.
+
+        The screen is gated on failure, not on markers, and the difference is
+        observable: `acceptance_command` is per-fixture and need not be pytest,
+        so a successful run can legitimately print nothing pytest-shaped.
+        Screening those would relabel a real pass as an apparatus fault.
+
+        The output here is deliberately marker-free for that reason. With a
+        pytest-shaped string the assertion holds either way -- mutation testing
+        showed removing the `not outcome.passed` clause survived -- so the
+        fixture, not the clause, was doing the work.
+        """
+        record = self._applied("acceptance: OK\n", passed=True)
+
+        assert record.incident_type is None
+        assert record.behavioral_complete is True
+
+    def test_a_conflict_still_wins_over_the_environment_branch(
+        self, workspace: Path
+    ) -> None:
+        """The two classifications must not compete.
+
+        A conflict is the more specific diagnosis and is checked first. This
+        pins that ordering, because a conflict's output also lacks pytest
+        markers and would otherwise be relabelled `environment`.
+        """
+        result = bench._run_acceptance(
+            _task(), workspace, DIFF_AGAINST_TEST_FILE, Path(sys.executable)
+        )
+        record = _record()
+        bench._apply_acceptance_result(record, result)
+
+        assert record.incident_type == bench.INCIDENT_TEST_CONFLICT
+
+    def test_environment_incidents_are_excluded_from_the_rate(self) -> None:
+        """The consequence the classification exists for.
+
+        `incident_type` drives the exclusion, so this pins the end-to-end
+        effect: the four click rows leave the denominator instead of counting
+        against the agent, which moved the measured full-arm rate from 4/9 to
+        4/7 and the automatic arm from 6/8 to 6/6.
         """
         rows = [
             {"behavioral_complete": True, "incident_type": None},
             {"behavioral_complete": False, "incident_type": None},
+            {"behavioral_complete": False, "incident_type": "environment"},
             {"behavioral_complete": False, "incident_type": bench.INCIDENT_TEST_CONFLICT},
         ]
         clean = [r for r in rows if r["incident_type"] is None]
-        assert len(clean) == 2, "the conflicted row must drop out of the denominator"
+
+        assert len(clean) == 2, "both incident rows must drop out of the denominator"
 
 
 # ---------------------------------------------------------------------------
