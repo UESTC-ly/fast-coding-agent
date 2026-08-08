@@ -45,6 +45,7 @@ from qqcode.models.protocol import (
     TextContent,
     ToolUseContent,
 )
+from qqcode.routing.locate import locate_files
 from qqcode.skills.index import SkillIndex
 from qqcode.tools.registry import ToolRegistry
 from qqcode.workspace.protocol import Workspace, WorkspaceSnapshot
@@ -322,7 +323,7 @@ def resolve_prefetch_paths(
 
     candidates = [raw.lstrip("./") for raw in _PATH_TOKEN.findall(task)]
     if not candidates:
-        return _resolve_advisory(prefetch_hint, workspace)
+        return _resolve_advisory_or_locate(task, prefetch_hint, workspace)
 
     resolved: list[str] = []
     unresolved: list[str] = []
@@ -349,9 +350,41 @@ def resolve_prefetch_paths(
     if resolved:
         return tuple(sorted(resolved)[:MAX_PREFETCH_RESOLVED_FILES])
 
-    # The task named files but none of them exist. The advisory hint is the only
-    # remaining source, and sending nothing is the outcome being fixed here.
-    return _resolve_advisory(prefetch_hint, workspace)
+    # The task named files but none of them exist. The advisory hint and the
+    # locator are the only remaining sources, and sending nothing is the outcome
+    # being fixed here.
+    return _resolve_advisory_or_locate(task, prefetch_hint, workspace)
+
+
+def _resolve_advisory_or_locate(
+    task: str,
+    prefetch_hint: tuple[str, ...],
+    workspace: Workspace,
+) -> tuple[str, ...]:
+    """The advisory hint if it verifies, otherwise a lexical guess from the tree.
+
+    Ordering is evidential, not preferential: the router's hint came from a model
+    that read the task, while the locator only counts words. When the hint names a
+    real file it wins. The locator exists for the case the hint cannot cover --
+    measured on the five derivable benchmark statements, the path regex matched
+    0/5 and the classifier 1/4, and those runs reach the model with no code at all
+    and decline at 23k-44k tokens.
+
+    Only the empty case is filled. A hint that resolves to one file is not topped
+    up to three, because every extra file is tokens spent on a guess about a task
+    the router already had an opinion about.
+
+    Locator output is verified through the workspace guard like every other
+    prefetch path, and stays advisory: this function feeds prefetch only, never
+    `files_hint`, so a wrong guess costs tokens rather than rejecting a correct
+    patch under condition 3.
+    """
+    verified = _resolve_advisory(prefetch_hint, workspace)
+    if verified:
+        return verified
+
+    located = locate_files(task, Path(workspace.root), MAX_PREFETCH_RESOLVED_FILES)
+    return tuple(p for p in located if _is_file(workspace, p))
 
 
 def _resolve_advisory(prefetch_hint: tuple[str, ...], workspace: Workspace) -> tuple[str, ...]:
