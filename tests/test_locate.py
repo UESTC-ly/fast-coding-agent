@@ -18,8 +18,20 @@ from pathlib import Path
 
 import pytest
 
+from qqcode.config import Config, ProviderConfig
+from qqcode.memory.trace import TraceRecord, TraceStore
+from qqcode.models.billing import BilledClient, RetryPolicy
+from qqcode.models.protocol import (
+    Completion,
+    CostLedger,
+    TextContent,
+    ToolUseContent,
+    Usage,
+)
+from qqcode.orchestrator import run_task
 from qqcode.routing.fastpath import (
     MAX_PREFETCH_RESOLVED_FILES,
+    PATCH_TOOL_NAME,
     resolve_prefetch_paths,
 )
 from qqcode.routing.locate import (
@@ -326,3 +338,138 @@ class TestWiring:
         )
         for rel in resolved:
             assert ws.read_file(rel)
+
+
+class TestLocatorReachesThePromptFromRunTask:
+    """The located file's *contents* must reach the model, via `run_task`.
+
+    `TestWiring` above calls `resolve_prefetch_paths` directly, so it proves the
+    resolver returns a path -- not that the path is read, inlined, and sent. Two
+    defects in this repository were exactly that gap, and the locator's own
+    measured value (60% @3 on the derivable statements) is worth nothing if the
+    text never lands in the prompt.
+
+    The shape reproduced here is the one the traces recorded for every observed
+    decline: `route_layer="l0"`, `files_hint=()`, and an L1 that supplies no
+    usable filename -- leaving the locator as the only possible source.
+    """
+
+    @staticmethod
+    def _run(repo: Path, task: str, l1_files: list[str]) -> tuple[str, TraceRecord]:
+        """Run `auto` end to end; return the FastPath prompt and its trace row.
+
+        The trace row is returned so the test can prove *which* route it
+        exercised. Asserting only on prompt text would pass if a future change
+        sent this task down the L1 route with a real hint, and the locator seam
+        would go untested while the test still looked green.
+        """
+        prompts: list[str] = []
+
+        class ScriptedAdapter:
+            def invoke(self, messages: list[object], **kwargs: object) -> Completion:
+                text = "\n".join(
+                    block.text
+                    for msg in messages  # type: ignore[attr-defined]
+                    for block in msg.content  # type: ignore[attr-defined]
+                    if isinstance(block, TextContent)
+                )
+                # `BilledClient` consumes `phase`, so the classifier is
+                # identified by its own system prompt, as in test_prefetch.py.
+                if "task routing classifier" in text:
+                    return Completion(
+                        content=[ToolUseContent(
+                            id="l1",
+                            name="classify_task",
+                            input={
+                                "decision": "fastpath",
+                                "confidence": 0.9,
+                                "files": l1_files,
+                                "reasoning": "simple",
+                            },
+                        )],
+                        stop_reason="tool_use",
+                        usage=Usage(input_tokens=10, output_tokens=5),
+                        raw={},
+                    )
+                prompts.append(text)
+                return Completion(
+                    content=[ToolUseContent(
+                        id="fp1",
+                        name=PATCH_TOOL_NAME,
+                        input={"reasoning": "done", "files": []},
+                    )],
+                    stop_reason="tool_use",
+                    usage=Usage(input_tokens=10, output_tokens=5),
+                    raw={},
+                )
+
+        client = BilledClient(
+            ScriptedAdapter(),
+            ledger=CostLedger(),
+            retry_policy=RetryPolicy(max_attempts=1, sleep=lambda _: None),
+        )
+        config = Config(
+            anthropic=ProviderConfig(api_key="fake", base_url=None),
+            openai=None,
+            default_provider="anthropic",
+        )
+        with TraceStore(repo / ".qqcode" / "trace.db") as store:
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(
+                    "qqcode.orchestrator.build_client",
+                    lambda *a, **k: (client, client._ledger),  # noqa: SLF001
+                )
+                run_task(
+                    task=task,
+                    repo=repo,
+                    config=config,
+                    mode="auto",
+                    dry_run=True,
+                    trace_store=store,
+                )
+            rows = store.all()
+
+        assert prompts, "FastPath was never reached"
+        assert len(rows) == 1, f"expected one trace row, got {len(rows)}"
+        return prompts[0], rows[0]
+
+    def test_located_file_contents_reach_the_prompt(self, repo: Path) -> None:
+        """The measured decline shape, end to end, with the locator as sole source.
+
+        "docstring" fires the built-in python-docstrings skill's
+        `routing_hint: fast`, so L0 decides FastPath with `files_hint=()`. The
+        statement names no path -- `_PATH_TOKEN` needs a known extension, and
+        there is no dotted token here -- and L1 returns no filename, so
+        `prefetch_hint` is empty too. Nothing but the locator can put code in
+        this prompt.
+        """
+        sent, row = self._run(repo, "Add a docstring where a broken repr is handled", [])
+
+        # Prove the route before trusting the prompt: this must be the hintless
+        # L0 entry that the traces show declining 4/4, not some other path.
+        assert row.route_layer == "l0"
+        assert row.files_hint_count == 0
+        assert row.prefetch_hint_count == 0
+
+        # The seam under test: name, section header, and body all present.
+        assert "### src/pkg/saferepr.py" in sent
+        assert "return repr(obj)" in sent
+
+    def test_locator_fills_in_when_the_advisory_hint_is_hallucinated(
+        self, repo: Path
+    ) -> None:
+        """A hint naming a nonexistent file must not suppress the locator.
+
+        L1 never saw the repository, so its guesses can name files that do not
+        exist. `_resolve_advisory` drops those, and the fallthrough to the
+        locator is what keeps the prompt from being empty -- the difference
+        between a 60%-recall guess and no code at all.
+        """
+        sent, row = self._run(
+            repo, "Add a docstring where a broken repr is handled", ["src/pkg/ghost.py"]
+        )
+
+        assert row.route_layer == "l0"
+        assert "### src/pkg/ghost.py" not in sent, "an unverified guess was inlined"
+        assert "### src/pkg/saferepr.py" in sent
+        assert "return repr(obj)" in sent
