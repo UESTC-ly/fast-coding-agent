@@ -1,7 +1,7 @@
 # QQCode 项目台账
 
 > **维护约定**：每个里程碑完成、范围变更或关键决策后立即更新本文件。
-> 最后更新：2026-08-06 · v1.0.0 已发布（53 模块 · 601 tests · ruff/mypy clean）
+> 最后更新：2026-08-07 · v1.0.0 已发布 · 660 tests + 2 xfailed（strict）· ruff/mypy clean
 
 ---
 
@@ -21,19 +21,29 @@
 
 **成本口径**：FastPath 前置请求、失败请求、Provider 重试、子代理消耗、升级后的 Full Agent 消耗，全部计入 `automatic_total`。不允许任何绕过计费入口的出网路径。
 
-### 1.1 指标达成实情（2026-08-06 核对）
+### 1.1 指标达成实情（2026-08-07 核对，数据源已逐字核实）
 
-三条指标里**只有一条有真实数据**，且样本不足以外推。如实记录，不四舍五入成「达标」。
+数据源：`benchmarks/results/qqcode-abba-20260807-063237/report.json`（AB/BA，openai/gpt-5.6-terra，5 个 derivable fixture，automatic 8 runs / full 9 runs，`cycles: 1`）。
 
 | 指标 | 目标 | 实测 | 如实记录 |
 |------|------|------|------|
-| 成本节省 | ≤ 50% | **13.8%**（automatic 868 vs full 6,297 tokens/任务） | 优于目标，方向已验证；**样本仅 3 个同类任务**，量级不可外推 |
-| 成功率 | ≥ 95% | — | **未测量**：需两模式跑同一任务集配对 |
-| 安全性 | 零逃逸 | — | 机制齐备且有 31 条单元不变量锁定，但**无端到端全量 diff 验证** |
+| 成本节省 | ≤ 50% | **+18.9%**（8 个可比对）/ **+4.0%**（报告口径：两者皆成功的 4 对） | 均未达目标。均值口径：automatic 30,625 vs full 43,080 tokens/run |
+| 成功率 | ≥ 95% | **automatic 6/8 = 75%**，full 4/9 = 44% | 未达目标，但 automatic **高于** full |
+| 安全性 | 零逃逸 | — | **这批数据完全没测**，见下方仪器缺陷 |
 
-成本那条来自 v1.0.0 的 FastPath 预取修复 A/B（真实 API，openai/gpt-5.6-terra，3 个单文件任务，arm A 用 monkeypatch 还原修复前行为）。口径符合上述定义：arm A 的 FastPath 失败消耗计入 `automatic_total`。
+**仪器缺陷（决定了上面每一个数怎么读）**：`benchmarks/qqcode_benchmark.py:698` 的 `run_task(...)` 调用**不传 `harness=`**（已逐行核实：该调用只有 task/repo/config/mode/dry_run/provider/model/reasoning_effort/trace_store）。所以：
 
-**为什么另两条测不了**：`behavioral_rate` 的分母是 15 个 fixture，但 2026-08-06 的离线审计确认其中只有 5 个的隐藏断言能从任务陈述推导（见 §7 R9）。在不可推导的 fixture 上，一个正确修复也会得 0 分，所以历史那个「0/15 行为率」不是能力数据。测量工具已于同日修好，但**尚未跑过一次**——当前位置是「仪器已校准，未读数」。
+- 三条件里的**条件 1（隐藏测试通过）在整个评测里恒为空**。`behavioral_complete` 不是三条件收敛的产物，是跑完之后由 `_run_acceptance` 另外打 `test_patch` 评出来的。
+- 上表的成功率**不是三条件通过率**。台账早前把 v1.0.0 那次也笼统称作「三条件」，是不准确的。
+- 零逃逸在这批数据里无从谈起。旁证：本轮新增的信任警告 17 次运行触发 0 次，说明 harness 通道确实一次都没走过（`_harness_ran` 在 benchmark 里只用于**检测输出里的警告**，不注入 harness）。
+
+**FastPath 自身命中率：2/6 = 33%**（`fastpath.attempted: 6, completed: 2, upgrades: 6`）。值得记下的是：即便 FastPath 只有三分之一命中，**automatic（FastPath + 升级）在成功率和 token 上同时优于纯 full**（75% vs 44%，30,625 vs 43,080）。这是「双档 + 路由」这个产品形态目前唯一的正面证据，但它出自上述残缺的门，且 n 很小，不能当结论用。
+
+**报告分母不一致（既有缺陷，非本轮引入）**：`_build_report` 的 `measurable`（第 955 行）只从 `clean_auto` 取，所以没有 automatic 运行的 `full_only` fixture 从可测量计数里消失，而它的 full 运行仍留在 `behavioral_rate_measurable_full` 的分母里。报告显示 `measurable_tasks: 4`，实际跑的是 5 个。两个 measurable 率因此不可比。
+
+**先前那个 13.8%** 来自 v1.0.0 的 FastPath 预取修复 A/B（3 个单文件任务，arm A 用 monkeypatch 还原修复前行为）。它和上面的 +18.9% **不是同一个数的两个版本，是两次不同的测量**：前者 n=3、只比预取修复前后；后者 n=5 fixture / 17 runs、比 automatic 与 full。以后者为主，前者降为参考。
+
+**为什么分母是 5 不是 15**：2026-08-06 的离线审计确认 15 个 fixture 里只有 5 个的隐藏断言能从任务陈述推导（见 §7 R9），在不可推导的 fixture 上一个正确修复也得 0 分。
 
 ---
 
@@ -312,6 +322,39 @@ qqcode --task "..."  --repo ./myproject  [--mode auto|fast|full]  [--dry-run]
 | finalize 原子写回 | ✅ 无 staging/backup 残留 | — |
 | 升级路径计费完整性 | ✅ FastPath 失败的 186 tokens 计入 `automatic_total` | — |
 
+### 预取定位器（2026-08-07，`0f50c4b`）
+
+**要解决的浪费**：任务不含文件名、无 `files_hint`、L1 恢复也失败时，FastPath 仍然会花一次调用。预取读不到任何文件，prompt 里没有代码，模型只能走文档化的出口。实测 4/4 全 declined，每次 23k–44k tokens；同一任务有线索时只需 5.8k。
+
+| 模块 | 文件 | 内容 |
+|------|------|------|
+| 词法定位器 | `qqcode/routing/locate.py` | `locate_files`：IDF 排序 + 文件名词干前缀 + 测试文件降权；有界目录遍历 |
+| 预取接线 | `qqcode/routing/fastpath.py` | `_resolve_advisory_or_locate`：建议 hint 能验证则用它，否则用定位器 |
+| 测试 | `tests/test_locate.py` | 30 条 |
+
+**生产路径实测 recall@3**（5 条 derivable 语句，cap=3，无 `files_hint` 无 `prefetch_hint`，即上述 4/4 必败的形状）：
+
+| 方法 | recall@3 |
+|------|------|
+| **定位器** | **3/5（60%）**，单次 6–22ms |
+| `_PATH_TOKEN` 文本提取 | 0/5 |
+| L1 分类器猜测 | 1/4 |
+
+两个 miss 是结构性的：`importlib double import` 的语句与 `pathlib.py` 词汇无交集；`dynamic xfail` 把 `nodes.py`/`python.py` 排在 `skipping.py` 前。
+
+**两个被实测否决的机制**（记在模块 docstring 里防止重提）：定义点加权 @3 无变化、@5 更差（测试文件大量 `def test_*`，它成了测试文件放大器）；标识符精确匹配把 @3 打到 20%。
+
+**一处自我纠正**：最初那个 60% 用的停用词表含 `regression`/`missing`/`twice` 等缺陷词。用另外 14 条语句做留一法后，增益消失——**那张表是照着答案拟合的**。改成只含功能词重建，60% 通过**测试文件降权**重现，而早前笔记把降权记作「@3 无贡献」，那是拟合表压住散文词造成的假象。
+
+**成本边界（实测）**：读+排序吞吐约 70MB/s，220 文件 / 2.3MB 约 50ms。本仓库原始树有约 6 万个被 gitignore 的 `.py`（`benchmarks/results/` 下的仓库副本），触发 2000 文件上限，115ms 后返回空。生产用 `use_git=True`，worktree 只有 71 个被跟踪的 `.py`，上限只是兜底。
+
+**已验证的不变量**（变异测试 18/20，6 个接线类变异全杀）：
+- 定位器结果只进 `prefetch_hint`，永不进 `files_hint`（后者兼任条件 3 契约，猜错是拒绝正确补丁而非浪费 token）
+- 建议 hint 能验证时优先于定位器
+- hint 指向不存在的文件时定位器不顶替它（那是「创建」语义）
+- 测试文件降权而非排除；词干前缀下限 5 字符；树超上限返回空而非截断排名
+- 两个存活变异是构造上冗余，测试里已写明，不假装覆盖
+
 ---
 
 ## 六、关键设计决策记录
@@ -343,6 +386,12 @@ qqcode --task "..."  --repo ./myproject  [--mode auto|fast|full]  [--dry-run]
 | spawn_subagent 解耦 | 回调注入（`SpawnCallback`），executor 不导入 agents | executor 直接调用 agents | 防止 tools ↔ agents 循环导入；test 时 mock 更简单 |
 | orchestrator 的 FastPath 升级路径 | 丢弃 shadow，建新 WorktreeWorkspace，传递 `escalation_context` | 复用已改动的 shadow | 半成品状态会以不可预测方式误导 Full Agent；干净基线 + 结构化诊断是正确的信息传递 |
 | CLI 命令结构 | 单命令（typer 默认），`qqcode --task ...` | 子命令 `qqcode run --task ...` | M6 只有一个用户可见命令；eval/replay 未到达 M5/M6，强行添加子命令只增加文档与测试负担 |
+| 定位器结果的去向 | 只进 `prefetch_hint` | 回写 `files_hint` 以便条件 3 生效 | `files_hint` 兼任条件 3 契约。喂进去等于把「浪费 token」换成「拒绝正确补丁」，方向反了 |
+| 定位器的排序机制 | IDF + 文件名词干前缀 + 测试文件降权 | 定义点加权 / 标识符精确匹配 | 前者实测 @3 无改进、@5 更差；后者把 @3 从 60% 打到 20%。均已实测否决，非「为简单而省略」 |
+| 定位器的停用词表 | 只含功能词与版控动词 | 含缺陷词（`regression`/`missing`/…）的手写表 | 手写表 @3 得 60%，但留一法证明增益来自被测语句自己的词——拟合答案。换表后 60% 由测试降权重现，机制可解释 |
+| 树超过 2000 文件时 | 返回空，不排名 | 排被截断的树 / 只排前 N | 截断排名会把 `os.walk` 恰好先到的子树当成整个仓库呈现给模型，是有害的假证据 |
+| **定位器摆在哪一层** | **路由层当信号**：答案集中→FastPath 带文件，发散或空→FullAgent | **FastPath 内当能力补丁**（`0f50c4b` 的做法，已判定摆错） | 用户 2026-08-07 指出：产品同时有 FastPath 和 FullAgent，不要求 FastPath 完成所有任务，只要路由合理即可。在 FastPath 内塞定位器 = 让它拿一次性词频猜测去抢 FullAgent（真读文件、能 grep、能迭代）更擅长的活 |
+| 路由依据 | 「改动是否小而局部」 | 「任务文本有没有写文件名」 | 后者判断的是提需求的人说话顺不顺手，不是任务难度。5 条 derivable 语句全不含路径，却全是几行的局部修复——正是 FastPath 该吃的活，按「无路径即转 FullAgent」会白让出去 |
 
 ---
 
@@ -361,6 +410,11 @@ qqcode --task "..."  --repo ./myproject  [--mode auto|fast|full]  [--dry-run]
 | 多数写类 MCP 服务器可能不支持根路径参数 | 可用的写类 server 很少 | 接受这个代价——保住三条件收敛优先于多支持一个 server |
 | skill 的实际收益未量化 | 可能是纯成本 | **仍未量化**（2026-08-06 核对）：`ReplayEngine.skill_impact()` 已实现，但 `.qqcode/trace.db` 为空（0 行），且该库 gitignored、历史 trace 已随临时仓库丢失。需先跑一批真实任务积累 trace |
 | ~~AcceptanceHarness 的安全声明未在 CLI / README 中对用户说明~~ | ~~用户可能从不可信来源接受验收套件~~ | ✅ 与 R10 同一件事（本行是 R10 编号前的旧记法），2026-08-07 一并关闭 |
+| **R11：benchmark 从不传 `harness=`，条件 1 在评测里恒空** | 所有 `behavioral_rate` 都不是三条件收敛的产物，而是跑完之后另打 `test_patch` 评出来的；**零逃逸这条指标在这批数据里完全没测**（17 次运行触发信任警告 0 次，反证 harness 通道从未走过） | 已核实：`benchmarks/qqcode_benchmark.py:698` 的 `run_task(...)` 参数表无 `harness=`；全文件仅 `_harness_ran`（223 行定义，795 行调用）在**检测输出里的信任警告**，不是注入。**修法不是简单补上**——把上游 `test_patch` 当 harness 会让 `build_escalation_context` 把 pytest 断言差异喂进 FullAgent 的 prompt，等于告诉 agent 答案，通过率会虚高。需要先设计一个不泄漏断言内容的诊断通道 |
+| **R12：未读文件可能被整文件写入静默覆盖** | 模型凭记忆重建一个它没读过的文件 = 销毁真文件。FastPath 写整文件，所以这是数据丢失级缺陷 | 部分缓解（2026-08-07）：prompt 侧已修（`ebf04fd`，删掉「缺席即不存在」那句假话）+ `_prefetch_files` docstring 纠正同一处误推。机械守卫**未落地**，用 `strict=True` xfail 钉住（`62764fa`）。当初判定「守卫不可分离」的依据是「碰撞的 ~10 个测试全部带空 prefetch 到达检查点」。**已验证（2026-08-07，零 API）：前提仍成立，且碰撞面变宽而非收窄 —— 临时插回最小守卫跑全套，660 passed/0 failed → 648 passed/13 failed（定位器落地前是 10）。测试一行未改。** 定位器没有消解碰撞：它填的 3 个预取槽未必是补丁要写的文件。附带发现：失败名单里含 `test_real_hint_still_enforces_condition_three`（`files_hint` 非空的用例），说明「存在于磁盘且不在预取里就拒」这条太粗——真正的守卫至少要豁免 `files_hint` 显式声明的路径（任务已授权）。xfail 维持 |
+| **R13：定位器摆错层（`0f50c4b`）** | 它现在在 FastPath 内当能力补丁，而非在路由层当信号 | 已定性未修：正确形态是路由层判「答案集中→FastPath 带文件 / 发散或空→FullAgent」，实现缝在建完 workspace、发请求之前（路由决策时 workspace 尚不存在，那是第一个能知道文件名是否真解析的地方）。之前搁置的「预取注定为空就转 FullAgent」的门与此合成同一个决定 |
+| **R14：FullAgent 在这批任务上只有一次残缺门下的观测** | 「转给 FullAgent 是正确路由」目前是假设不是结论 | 已有数字但有已知缺陷：full 4/9 = 44.4%、43,080 tokens/run（同 R11 的空条件 1）。同一批里 automatic 是 6/8 = 75%、30,625 tokens——**双档在成功率和成本上同时赢过纯 FullAgent**，这是支持双档架构本身的直接证据。样本 n 小，需要 `--cycles ≥ 3` 复测 |
+| **R15：`success \| right file` 仅 n=2** | 定位器 60% recall 的全部价值押在这一环上；文件给对了但补丁还是错，前面省的都白算 | 未测。需真实 API，跑前先给成本预估。这是当前主线的真卡点 |
 
 ---
 
